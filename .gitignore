@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.bak-*
+ops/reports/*.log
+ops/reports/*.done
+ops/reports/*.stdout
+ops/reports/*.prompt.md
+ops/reports/*.last.md
+ops/routing.json
+.venv/

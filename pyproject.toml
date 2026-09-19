@@ -1,0 +1,23 @@
+[project]
+name = "jev-build-router"
+version = "0.1.0"
+description = "Route work packages to build engines with Jev (TypeSafe) and drive agy/codex headlessly; Claude Code workflow scripts for review and DAG builds."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+jbr = "jbr.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["jbr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
