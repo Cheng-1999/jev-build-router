@@ -59,8 +59,8 @@ Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `codex_ast
 
 ```json
 {
-  "rules": "Rules: Python 3.12, src layout under src/pkg, pytest.",   // optional, engineer rules line
-  "goal": "Finish Sprint 1 fastest without sacrificing numerical correctness.",   // optional, routing goal
+  "rules": "Rules: Python 3.12, src layout under src/pkg, pytest.",
+  "goal": "Finish Sprint 1 fastest without sacrificing numerical correctness.",
   "work_packages": [
     {
       "id": "WP04",
@@ -78,13 +78,15 @@ Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `codex_ast
 }
 ```
 
+Top-level keys (both optional): `rules` is a project-specific line PREPENDED to the built-in engineer rules (`runner.DEFAULT_RULES`: do not modify files owned by other packages, no git commit, no files outside the repo, run the full suite and report); it never replaces them. `goal` is the routing goal sentence given to Jev. A package-level `rules` field works the same way. Package ids should not contain `-` unless `ops/work_packages.json` is present when running `status` (it resolves hyphenated ids against the known ids).
+
 A bare list of packages is accepted too. `routing_hints` is free-form and passed to Jev verbatim; `depth` (1 = root) is computed from `depends_on` unless the hints set it. `ops/prompts/<WP>.md` is inlined verbatim into the engine prompt when present.
 
 Output `ops/routing.json`: `{"model": "jev-1.13.0", "state": {...}, "routing": {"WP04": {"engine": "agy_gemini_pro", "confidence": 0.62, "probabilities": {...}}}}`.
 
 ## Run artifacts (`ops/reports/`)
 
-`run-<WP>[-tag].prompt.md` (self-contained prompt), `.log` (engine transcript), `.done` (`"<exit> <minutes>min"`), `.stdout` (detached wrapper), `.last.md` (codex final message). `compose-fix` writes `review-<WP>-round<N>.json` and `fix-<WP>-round<N>.md`.
+`run-<WP>[-tag].prompt.md` (self-contained prompt), `.log` (engine transcript), `.done` (`"<exit> <minutes>min"`; `-1` when `jbr run` itself crashed, traceback appended to `.log`), `.stdout` (detached wrapper), `.last.md` (codex final message). `spawn` exits 2 before launching anything when the engine key is not in `engines.json`. `compose-fix` writes `review-<WP>-round<N>.json` and `fix-<WP>-round<N>.md`.
 
 ## Calling the workflows from Claude Code
 

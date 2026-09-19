@@ -18,6 +18,7 @@ import pathlib
 import subprocess
 import sys
 import time
+import traceback
 from typing import Any
 
 RUN_PREFIX = "run"
@@ -74,13 +75,20 @@ def _as_list(v: Any) -> list[str]:
     return [str(x) for x in v]
 
 
+def rules_line(rules: str | None) -> str:
+    """Project rules are a PREFIX to DEFAULT_RULES, never a replacement: the ownership /
+    no-commit / no-files-outside-repo rules are always emitted."""
+    rules = (rules or "").strip()
+    return f"{rules} {DEFAULT_RULES}" if rules else DEFAULT_RULES
+
+
 def compose_prompt(project_root: str | os.PathLike, wp: dict, prompts_dir: str | os.PathLike = "ops/prompts",
                    extra: str = "", rules: str | None = None) -> str:
     root = pathlib.Path(project_root)
     lines = [
         f"You are the software engineer on work package {wp['id']}: {wp.get('title', '')}.",
         f"Repository root (already exists): {root}",
-        rules or wp.get("rules") or DEFAULT_RULES,
+        rules_line(rules or wp.get("rules")),
         "",
         "GOAL",
         wp.get("goal", ""),
@@ -163,40 +171,55 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
 
     Returns {"wp", "engine", "cmd", "exit", "minutes", "paths"}; exit is None on dry-run
     and "workflow" when the engine is claude_subagent.
+
+    Any exception (unknown engine/package, bad packages file, engine launch failure) is
+    re-raised AFTER writing the .done marker as "-1 <minutes>min" and the traceback into the
+    .log, so a poller waiting on the marker never hangs (dry-run: no marker is written).
     """
     root = pathlib.Path(project_root).resolve()
-    if engine_key not in engines:
-        raise KeyError(f"unknown engine {engine_key!r}; known: {sorted(engines)}")
-    engine = engines[engine_key]
-    packages, meta = load_packages(packages_path)
-    wp = find_package(packages, wp_id)
     paths = report_paths(root, wp_id, tag, reports_dir)
     paths["dir"].mkdir(parents=True, exist_ok=True)
-    prompt = compose_prompt(root, wp, prompts_dir, extra, rules or meta.get("rules"))
-    paths["prompt"].write_text(prompt, encoding="utf-8")
     if paths["done"].exists():
         paths["done"].unlink()
-
-    cmd = build_command(engine, paths["prompt"], root, paths["last"], timeout)
-    result: dict[str, Any] = {"wp": wp_id, "engine": engine_key, "cmd": cmd, "exit": None, "minutes": 0.0,
+    result: dict[str, Any] = {"wp": wp_id, "engine": engine_key, "cmd": None, "exit": None, "minutes": 0.0,
                               "paths": {k: str(v) for k, v in paths.items()}}
-    if cmd is None:
-        result["exit"] = "workflow"
-        result["note"] = "engine is a Claude Code subagent: hand this package to workflows/build_dag.js"
-        return result
-    if dry_run:
-        result["note"] = "dry-run: command not executed"
-        return result
-
     t0 = time.time()
-    with open(paths["log"], "w", encoding="utf-8") as fh:
-        fh.write(f"# {engine_key} run {wp_id} model={engine.get('model')} effort={engine.get('effort')}\n\n")
-        fh.flush()
-        p = subprocess.run(cmd, cwd=root, stdout=fh, stderr=subprocess.STDOUT, env=_env())
-    dt = (time.time() - t0) / 60
-    paths["done"].write_text(f"{p.returncode} {dt:.1f}min\n", encoding="utf-8")
-    result.update(exit=p.returncode, minutes=round(dt, 1))
-    return result
+    try:
+        if engine_key not in engines:
+            raise KeyError(f"unknown engine {engine_key!r}; known: {sorted(engines)}")
+        engine = engines[engine_key]
+        packages, meta = load_packages(packages_path)
+        wp = find_package(packages, wp_id)
+        prompt = compose_prompt(root, wp, prompts_dir, extra, rules or meta.get("rules"))
+        paths["prompt"].write_text(prompt, encoding="utf-8")
+
+        cmd = build_command(engine, paths["prompt"], root, paths["last"], timeout)
+        result["cmd"] = cmd
+        if cmd is None:
+            result["exit"] = "workflow"
+            result["note"] = "engine is a Claude Code subagent: hand this package to workflows/build_dag.js"
+            return result
+        if dry_run:
+            result["note"] = "dry-run: command not executed"
+            return result
+
+        with open(paths["log"], "w", encoding="utf-8") as fh:
+            fh.write(f"# {engine_key} run {wp_id} model={engine.get('model')} effort={engine.get('effort')}\n\n")
+            fh.flush()
+            p = subprocess.run(cmd, cwd=root, stdout=fh, stderr=subprocess.STDOUT, env=_env())
+        dt = (time.time() - t0) / 60
+        paths["done"].write_text(f"{p.returncode} {dt:.1f}min\n", encoding="utf-8")
+        result.update(exit=p.returncode, minutes=round(dt, 1))
+        return result
+    except Exception:
+        if dry_run:
+            raise
+        dt = (time.time() - t0) / 60
+        tb = traceback.format_exc()
+        with open(paths["log"], "a", encoding="utf-8") as fh:
+            fh.write(f"\n# jbr run {wp_id} engine={engine_key} CRASHED after {dt:.1f}min\n{tb}")
+        paths["done"].write_text(f"-1 {dt:.1f}min\n", encoding="utf-8")
+        raise
 
 
 def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag: str = "",
@@ -250,13 +273,26 @@ def wait(project_root: str | os.PathLike, wp_ids: list[str], tag: str = "", time
         sleep(poll_s)
 
 
-def status(project_root: str | os.PathLike, reports_dir: str = "ops/reports") -> list[dict]:
+def split_stem(stem: str, known_ids: list[str] | None = None) -> tuple[str, str]:
+    """`<wp>[-<tag>]` -> (wp, tag). Hyphenated package ids are resolved against known_ids
+    (longest match wins); without known_ids the id is everything before the first `-`."""
+    for wp in sorted(known_ids or [], key=len, reverse=True):
+        if stem == wp:
+            return wp, ""
+        if stem.startswith(wp + "-"):
+            return wp, stem[len(wp) + 1:]
+    wp, _, tag = stem.partition("-")
+    return wp, tag
+
+
+def status(project_root: str | os.PathLike, reports_dir: str = "ops/reports",
+           known_ids: list[str] | None = None) -> list[dict]:
     """One row per run-* prompt file: wp, tag, done marker, log size."""
     rep = pathlib.Path(project_root) / reports_dir
     rows = []
     for prompt in sorted(rep.glob(f"{RUN_PREFIX}-*.prompt.md")) if rep.exists() else []:
         stem = prompt.name[: -len(".prompt.md")][len(RUN_PREFIX) + 1:]
-        wp, _, tag = stem.partition("-")
+        wp, tag = split_stem(stem, known_ids)
         done = read_done(project_root, wp, tag, reports_dir)
         log = rep / f"{RUN_PREFIX}-{stem}.log"
         rows.append({"wp": wp, "tag": tag, "done": done, "log_bytes": log.stat().st_size if log.exists() else 0})

@@ -49,6 +49,8 @@ const RUN_PREFIX = 'run'
 const engineOf = id => ROUTING[id] || 'claude_subagent'
 const external = id => engineOf(id) !== 'claude_subagent'
 if (Object.keys(PKGS).some(external) && !JBR) throw new Error('args.jbr (POSIX path of jev-build-router) is required when a package is routed to an external engine')
+// every dependency must be a package in this run or already done; a silent drop would start a package with its dep unbuilt
+for (const [id, deps] of Object.entries(PKGS)) for (const d of deps) if (!DONE.has(d) && !PKGS[d]) throw new Error(`unknown dependency ${d} of ${id}: not in args.packages or args.done`)
 
 const specPath = id => join(PROMPTS, `${id}.md`)
 const runStem = (id, tag) => `${RUN_PREFIX}-${id}${tag ? '-' + tag : ''}`
@@ -116,6 +118,11 @@ async function reviewRound(id, round) {
     agent(refutePrompt(id, f), { label: `verify:${id}:r${round}`, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'medium' })
       .then(v => ({ f, refuted: !!(v && v.refuted) }))))
   const confirmed = votes.filter(Boolean).filter(v => !v.refuted).map(v => v.f)
+  if (rev.verdict === 'fix' && !rev.failures.length) {
+    // reviewer said fix (e.g. tests not green) but listed no failure entry: keep the verdict, give the fixer something concrete
+    log(`${id}: review round ${round} verdict 'fix' with zero failure entries (${rev.pytest_summary}); kept as fix`)
+    confirmed.push({ criterion: 'reviewer verdict fix without failure entries', severity: 'medium', evidence: rev.pytest_summary || 'no pytest summary reported', fix: 'make the full suite green and satisfy every acceptance criterion in the spec' })
+  }
   return { verdict: confirmed.length ? 'fix' : 'accept', confirmed, low: rev.failures.filter(f => f.severity === 'low'), rev }
 }
 
@@ -155,7 +162,7 @@ const P = {}
 const start = id => {
   if (P[id]) return P[id]
   P[id] = (async () => {
-    await Promise.all(PKGS[id].filter(d => !DONE.has(d) && PKGS[d]).map(d => start(d)))
+    await Promise.all(PKGS[id].filter(d => !DONE.has(d)).map(d => start(d)))
     return build(id)
   })()
   return P[id]

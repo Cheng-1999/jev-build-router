@@ -131,6 +131,95 @@ def test_wait_polls_until_markers_exist(project):
     assert state["WP09"] is None
 
 
+def test_custom_rules_are_a_prefix_never_a_replacement(project, packages, engines, monkeypatch):
+    wp = runner.find_package(packages, "WP01")
+    text = runner.compose_prompt(project, wp, "ops/prompts", rules="Rules: demo")
+    assert "Rules: demo " + runner.DEFAULT_RULES in text
+    assert "do NOT modify files owned by other work packages" in text and "Do not commit to git." in text
+    # package-level rules field: same treatment
+    text = runner.compose_prompt(project, dict(wp, rules="Rules: pkg-level"), "ops/prompts")
+    assert "Rules: pkg-level " + runner.DEFAULT_RULES in text
+    # top-level rules from work_packages.json through run()
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no exec")))
+    res = runner.run(project, "WP01", "agy_gemini_pro", engines, project / "ops" / "work_packages.json", dry_run=True)
+    prompt = pathlib.Path(res["paths"]["prompt"]).read_text(encoding="utf-8")
+    assert "Rules: Python 3.12, src layout under src/demo, pytest. " + runner.DEFAULT_RULES in prompt
+    assert prompt.count("Do not commit to git.") == 1
+    assert runner.rules_line(None) == runner.DEFAULT_RULES and runner.rules_line("  ") == runner.DEFAULT_RULES
+
+
+def test_run_crash_writes_done_marker_and_traceback(project, engines, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("engine binary missing")
+
+    monkeypatch.setattr(runner.subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="engine binary missing"):
+        runner.run(project, "WP01", "codex_astra", engines, project / "ops" / "work_packages.json")
+    done = runner.read_done(project, "WP01")
+    assert done == {"exit": -1, "minutes": 0.0}
+    paths = runner.report_paths(project, "WP01")
+    assert paths["done"].read_text(encoding="utf-8") == "-1 0.0min\n"
+    log = paths["log"].read_text(encoding="utf-8")
+    assert log.startswith("# codex_astra run WP01") and "CRASHED" in log
+    assert "Traceback (most recent call last)" in log and "RuntimeError: engine binary missing" in log
+    # crash before the engine even starts (unknown engine / unknown package): marker still written
+    with pytest.raises(KeyError, match="unknown engine"):
+        runner.run(project, "WP02", "bogus", engines, project / "ops" / "work_packages.json", tag="fix1")
+    assert runner.read_done(project, "WP02", "fix1")["exit"] == -1
+    assert "KeyError" in runner.report_paths(project, "WP02", "fix1")["log"].read_text(encoding="utf-8")
+    with pytest.raises(KeyError, match="unknown work package"):
+        runner.run(project, "WP99", "codex_astra", engines, project / "ops" / "work_packages.json")
+    assert runner.read_done(project, "WP99")["exit"] == -1
+    # dry-run crash: raises, but leaves no marker behind
+    with pytest.raises(KeyError):
+        runner.run(project, "WP98", "bogus", engines, project / "ops" / "work_packages.json", dry_run=True)
+    assert runner.read_done(project, "WP98") is None
+
+
+def test_spawn_sets_pythonpath_and_detaches(project, monkeypatch):
+    seen = {}
+
+    class FakePopen:
+        pid = 77
+
+        def __init__(self, argv, **kw):
+            seen["argv"], seen["kw"] = argv, kw
+            kw["stdout"].write("child stdout\n")
+            kw["stdout"].close()
+
+    monkeypatch.setattr(runner.subprocess, "Popen", FakePopen)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    (project / "ops" / "reports").mkdir(parents=True)
+    (project / "ops" / "reports" / "run-WP01.done").write_text("0 1.0min\n", encoding="utf-8")
+    res = runner.spawn(project, "WP01", ["--engine", "codex_astra"])
+    assert res["pid"] == 77 and res["argv"] == seen["argv"]
+    assert seen["argv"][1:5] == ["-m", "jbr", "run", "WP01"]
+    repo_root = str(pathlib.Path(runner.__file__).resolve().parents[1])
+    assert seen["kw"]["env"]["PYTHONPATH"] == repo_root
+    assert seen["kw"]["cwd"] == project.resolve() and seen["kw"]["stdin"] is runner.subprocess.DEVNULL
+    if runner.os.name == "nt":
+        assert seen["kw"]["creationflags"] & runner.subprocess.DETACHED_PROCESS
+        assert seen["kw"]["creationflags"] & runner.subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert seen["kw"]["start_new_session"] is True
+    assert (project / "ops" / "reports" / "run-WP01.stdout").read_text(encoding="utf-8") == "child stdout\n"
+    assert not (project / "ops" / "reports" / "run-WP01.done").exists()  # stale marker removed before launch
+
+
+def test_split_stem_and_status_with_hyphenated_ids(project):
+    assert runner.split_stem("WP01") == ("WP01", "")
+    assert runner.split_stem("WP01-fix1") == ("WP01", "fix1")
+    assert runner.split_stem("WP-X-fix1") == ("WP", "X-fix1")  # no known ids: first `-` splits
+    assert runner.split_stem("WP-X-fix1", ["WP-X", "WP"]) == ("WP-X", "fix1")
+    assert runner.split_stem("WP-X", ["WP-X"]) == ("WP-X", "")
+    rep = project / "ops" / "reports"
+    rep.mkdir(parents=True)
+    (rep / "run-WP-X-fix1.prompt.md").write_text("p", encoding="utf-8")
+    (rep / "run-WP-X-fix1.done").write_text("2 0.5min\n", encoding="utf-8")
+    rows = runner.status(project, known_ids=["WP-X"])
+    assert rows == [{"wp": "WP-X", "tag": "fix1", "done": {"exit": 2, "minutes": 0.5}, "log_bytes": 0}]
+
+
 def test_compose_fix_writes_fix_file_only_for_fix_verdicts(project):
     review = [
         {"wp": "WP01", "verdict": "fix",

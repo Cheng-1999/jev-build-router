@@ -14,7 +14,7 @@ cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 
 ## Preconditions in the target project
 
-- `ops/work_packages.json`: `{"work_packages": [{id, title, goal, depends_on, files, acceptance, tests, spec_refs, implementer_prompt, routing_hints?}]}`. Optional top-level `rules` (engineer rules line) and `goal` (routing goal).
+- `ops/work_packages.json`: `{"work_packages": [{id, title, goal, depends_on, files, acceptance, tests, spec_refs, implementer_prompt, routing_hints?}]}`. Optional top-level `rules` (project line prepended to the built-in ownership / no-commit / no-files-outside-repo rules, never replacing them) and `goal` (routing goal).
 - `ops/prompts/<WP>.md`: the full per-package spec (inlined verbatim into the engine prompt).
 - `TYPESAFE_API_KEY` in the environment for `route` (not needed for `--dry-run` or when only one engine is available).
 
@@ -31,8 +31,8 @@ cd <project> && PYTHONPATH="$JBR" python -m jbr --help
             maxFixRounds: 2, testCmd: "python -m pytest -q" }
    ```
    Packages routed to `claude_subagent` are implemented by workflow subagents; every other engine is launched through `python -m jbr spawn` by a low-effort runner agent that waits on the `.done` marker. Every package, whatever the engine, gets fresh-context review, refutation and up to `maxFixRounds` fix rounds.
-4. **Review an already-built level separately** (e.g. packages built outside the workflow): Workflow tool with `scriptPath = ...\workflows\review_level.js`, `args = { root, ids: ["WP01", "WP02"] }`. Save the workflow output to a json file, then `python -m jbr compose-fix <output.json> <round>` writes `ops/reports/fix-<WP>-round<N>.md`; re-run the engine with `python -m jbr spawn WP --tag fix1 --extra-file ops/reports/fix-WP-round1.md`.
-5. **Monitor.** `python -m jbr status` (routing + `.done` markers), `python -m jbr wait WP05 WP06 --timeout-min 70`.
+4. **Review an already-built level separately** (e.g. packages built outside the workflow): Workflow tool with `scriptPath = ...\workflows\review_level.js`, `args = { root, ids: ["WP01", "WP02"] }`. Save the workflow output to a json file, then `PYTHONPATH="$JBR" python -m jbr compose-fix <output.json> <round>` writes `ops/reports/fix-<WP>-round<N>.md`; re-run the engine with `PYTHONPATH="$JBR" python -m jbr spawn WP --tag fix1 --extra-file ops/reports/fix-WP-round1.md`.
+5. **Monitor.** `PYTHONPATH="$JBR" python -m jbr status` (routing + `.done` markers), `PYTHONPATH="$JBR" python -m jbr wait WP05 WP06 --timeout-min 70` (exit 124 while a marker is still missing). Every `python -m jbr` call needs `PYTHONPATH="$JBR"` unless `pip install -e` was run.
 
 ## Known engine pitfalls (see README "Known pitfalls")
 

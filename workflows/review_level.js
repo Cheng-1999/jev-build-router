@@ -6,7 +6,7 @@
 // args = {
 //   root: 'C:\\path\\to\\project',      // required
 //   posixRoot: '/c/path/to/project',    // default: derived from root
-//   ids: ['WP01', 'WP02'],              // required (a bare array is accepted too)
+//   ids: ['WP01', 'WP02'],              // required (args must be this object; a bare array has no root)
 //   promptsDir: 'ops/prompts', reportsDir: 'ops/reports',
 //   testCmd: 'python -m pytest -q',
 //   logPrefix: 'run'                    // engine transcript is <reportsDir>/<logPrefix>-<id>.log
@@ -20,8 +20,8 @@ export const meta = {
   ],
 }
 
-const A = Array.isArray(args) ? { ids: args } : (args || {})
-const ids = A.ids || []
+const A = args || {}
+const ids = Array.isArray(A.ids) ? A.ids : []
 if (!A.root) throw new Error('args.root (project root) is required')
 if (!ids.length) throw new Error('pass work package ids via args.ids, e.g. { root, ids: ["WP01"] }')
 
@@ -79,6 +79,11 @@ const results = await pipeline(ids,
     const confirmed = votes.filter(Boolean).filter(v => !v.refuted).map(v => v.f)
     const refuted = votes.filter(Boolean).filter(v => v.refuted).map(v => ({ ...v.f, refute_reason: v.reason }))
     const low = rev.failures.filter(f => f.severity === 'low')
+    if (rev.verdict === 'fix' && !rev.failures.length) {
+      // reviewer said fix (e.g. tests not green) but listed no failure entry: keep the verdict, give compose-fix something concrete
+      log(`${id}: verdict 'fix' with zero failure entries (${rev.pytest_summary}); kept as fix`)
+      confirmed.push({ criterion: 'reviewer verdict fix without failure entries', severity: 'medium', evidence: rev.pytest_summary || 'no pytest summary reported', fix: 'make the full suite green and satisfy every acceptance criterion in the spec' })
+    }
     return { wp: id, verdict: confirmed.length ? 'fix' : 'accept', pytest_summary: rev.pytest_summary, test_count: rev.test_count,
       confirmed_failures: confirmed, refuted_findings: refuted, low_findings: low,
       ownership_violations: rev.ownership_violations, mutation_check: rev.mutation_check, passed_count: rev.passed_criteria.length }

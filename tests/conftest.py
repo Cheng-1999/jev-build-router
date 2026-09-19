@@ -6,7 +6,7 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 PACKAGES = {
-    "rules": "Rules: Python 3.12, src layout under src/demo, pytest.",
+    "rules": "Rules: Python 3.12, src layout under src/demo, pytest.",  # prefix only; runner.DEFAULT_RULES is always appended
     "work_packages": [
         {"id": "WP01", "title": "Foundation", "goal": "core types", "depends_on": [], "files": ["src/demo/core.py"],
          "acceptance": ["tests/test_core.py::test_a"], "tests": ["see acceptance"], "spec_refs": ["PLAN 1"],

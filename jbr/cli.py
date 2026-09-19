@@ -145,17 +145,22 @@ def cmd_spawn(a) -> int:
     rc = 0
     for wp in a.wp_ids:
         engine_key = _engine_for(a, wp, project)
-        if engines.get(engine_key, {}).get("runner") == "claude_subagent":
+        if engine_key not in engines:
+            # validate here: the detached child would only leave a traceback in .stdout
+            print(f"{wp}: unknown engine {engine_key!r}; known: {sorted(engines)}", file=sys.stderr)
+            return 2
+        if engines[engine_key].get("runner") == "claude_subagent":
             print(f"{wp}: engine {engine_key} is a Claude Code subagent; hand it to workflows/build_dag.js")
             continue
-        run_args = ["--engine", engine_key, "--engines", a.engines, "--packages", a.packages, "--prompts", a.prompts,
-                    "--reports", a.reports, "--timeout", a.timeout]
+        # the child runs with cwd=project: paths given relative to THIS cwd must be made absolute
+        run_args = ["--engine", engine_key, "--engines", str(pathlib.Path(a.engines).resolve()),
+                    "--packages", a.packages, "--prompts", a.prompts, "--reports", a.reports, "--timeout", a.timeout]
         for ov in a.available:
             run_args += ["--available", ov]
         if a.extra:
             run_args += ["--extra", a.extra]
         if a.extra_file:
-            run_args += ["--extra-file", a.extra_file]
+            run_args += ["--extra-file", str(pathlib.Path(a.extra_file).resolve())]
         # global options land after `run`; main() hoists them in the child via _hoist_globals
         res = runner.spawn(project, wp, run_args, tag=a.tag, reports_dir=a.reports, dry_run=a.dry_run)
         if a.dry_run:
@@ -166,6 +171,9 @@ def cmd_spawn(a) -> int:
 
 
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
+# sub-options that take one value: the token after them is a VALUE, never a global option
+VALUE_OPTS = {"--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
+              "--model", "--timeout-min", "--poll"}
 
 
 def _hoist_globals(argv: list[str]) -> list[str]:
@@ -181,7 +189,10 @@ def _hoist_globals(argv: list[str]) -> list[str]:
     i = 0
     while i < len(tail):
         t = tail[i]
-        if t in GLOBAL_OPTS and i + 1 < len(tail):
+        if t in VALUE_OPTS and i + 1 < len(tail):
+            rest += [t, tail[i + 1]]
+            i += 2
+        elif t in GLOBAL_OPTS and i + 1 < len(tail):
             hoisted += [t, tail[i + 1]]
             i += 2
         elif any(t.startswith(g + "=") for g in GLOBAL_OPTS):
@@ -217,7 +228,9 @@ def cmd_compose_fix(a) -> int:
 def cmd_status(a) -> int:
     project = pathlib.Path(a.project).resolve()
     routing = router.load_routing(project)
-    rows = runner.status(project, a.reports)
+    pk_path = project / a.packages
+    known_ids = [w["id"] for w in runner.load_packages(pk_path)[0]] if pk_path.exists() else []
+    rows = runner.status(project, a.reports, known_ids)
     if routing:
         print("routing: " + ", ".join(f"{k}={v}" for k, v in routing.items()))
     if not rows:
