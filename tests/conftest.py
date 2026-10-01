@@ -31,10 +31,21 @@ def project(tmp_path):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def isolated_engine_state(tmp_path, monkeypatch):
+    """Every test gets its own engine state file: never touch ~/.jbr, never inherit a real quota."""
+    path = tmp_path / "jbr-state" / "engine_state.json"
+    monkeypatch.setenv("JBR_STATE", str(path))
+    return path
+
+
 @pytest.fixture
 def engines():
+    """engines.json with the pre-chain availability (agy Opus and Codex off). Since 2026-10-02 every
+    engine is `available: true` in engines.json and live probes decide; the routing tests written
+    before that keep their two-engine fixture."""
     from jbr import router
-    return router.load_engines(REPO / "engines.json")
+    return router.load_engines(REPO / "engines.json", {"agy_claude_opus": False, "codex_astra": False})
 
 
 @pytest.fixture

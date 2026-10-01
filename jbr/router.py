@@ -7,6 +7,14 @@ engine keys. Result written to <project_root>/ops/routing.json as
 Package attributes shown to Jev come from each package's optional `routing_hints`
 dict (numerical_difficulty, sign_convention_critical, in_flight_on, ...); `depth`
 is taken from routing_hints when present, otherwise computed from depends_on.
+
+Engine chain (2026-10-02): each engine has a `priority` (1 = preferred). When `availability`
+(live `jbr probe` results, see jbr/state.py) is passed, Jev sees every engine's priority and live
+status, may only choose a usable one, and is asked to prefer the highest-priority usable engine
+unless the package's hints clearly favour another. Each package also gets a fallback chain
+(Jev's pick, then the other usable engines by priority, ending in claude_subagent), written to
+routing.json as routing[wp].chain and as the top-level {"chains": {wp: [...]}} that
+workflows/build_dag.js takes as its `routing` arg.
 """
 from __future__ import annotations
 
@@ -24,6 +32,15 @@ DEFAULT_GOAL = (
     "Finish, review and audit the build fastest without sacrificing correctness. Every package is "
     "reviewed by fresh Claude reviewers with adversarial refutation and up to 2 fix rounds regardless of engine."
 )
+CHAIN_POLICY = (
+    "Engine chain: engines are ranked by `priority` (1 = most preferred; the user's default order is agy Gemini, "
+    "agy Claude Opus, Codex, Claude subagent as last resort). Prefer the highest-priority engine that is available "
+    "now, unless this package's routing hints (numerical difficulty, state consistency / sign-convention "
+    "criticality, size) clearly favour another available engine. Never choose an engine whose live_status is "
+    "EXHAUSTED or UNAVAILABLE: it is out of quota or broken right now and is not offered as an answer."
+)
+LAST_RESORT = "claude_subagent"
+USABLE_STATUSES = {"AVAILABLE", "UNKNOWN"}  # UNKNOWN = not probed (offline / dry-run)
 SCHEDULING_NOTE = (
     "depth = position in the dependency chain; depth 1 starts now, each further level starts roughly "
     "20-40 minutes later. Packages already in flight on an engine (in_flight_on) should only be re-routed "
@@ -64,13 +81,50 @@ def available_engines(engines: dict[str, dict]) -> dict[str, dict]:
     return {k: v for k, v in engines.items() if v.get("available", True)}
 
 
-def engine_description(key: str, eng: dict) -> str:
+def by_priority(engines: dict[str, dict]) -> list[str]:
+    """Engine keys by priority ascending (missing priority last), engines.json order on ties."""
+    keys = list(engines)
+    return sorted(keys, key=lambda k: (engines[k].get("priority", 99), keys.index(k)))
+
+
+def usable_engines(engines: dict[str, dict], availability: dict[str, dict] | None = None) -> dict[str, dict]:
+    """Available engines (engines.json / --available) minus those whose live probe is not usable."""
+    avail = available_engines(engines)
+    if availability is None:
+        return avail
+    return {k: v for k, v in avail.items() if availability.get(k, {}).get("status", "UNKNOWN") in USABLE_STATUSES}
+
+
+def engine_description(key: str, eng: dict, live: dict | None = None) -> str:
     bits = [eng.get("description", key)]
     bits.append(f"runner={eng.get('runner', '?')} model={eng.get('model', '?')} effort={eng.get('effort', '?')}")
     if eng.get("parallel_limit"):
         bits.append(f"up to {eng['parallel_limit']} packages in parallel")
+    if eng.get("priority") is not None:
+        bits.append(f"chain priority {eng['priority']} (1 = most preferred)")
     bits.append("currently available: " + ("yes" if eng.get("available", True) else "no"))
+    if live is not None:
+        bits.append(f"live_status: {live.get('status', 'UNKNOWN')}" + (f" until {live['until']}" if live.get("until") else ""))
     return ". ".join(bits)
+
+
+def chain_for(pick: str, engines: dict[str, dict], availability: dict[str, dict] | None = None) -> list[str]:
+    """Jev's pick first, then the other usable engines by priority, ending in claude_subagent."""
+    if pick == LAST_RESORT:  # never quota-limited: nothing after it would ever run
+        return [LAST_RESORT]
+    usable = usable_engines(engines, availability)
+    chain = [pick] + [k for k in by_priority(engines) if k in usable and k not in (pick, LAST_RESORT)]
+    if LAST_RESORT in engines and LAST_RESORT not in chain:
+        chain.append(LAST_RESORT)
+    return chain
+
+
+def live_status(key: str, engines: dict[str, dict], availability: dict[str, dict] | None) -> str:
+    if not engines[key].get("available", True):
+        return "UNAVAILABLE"
+    if availability is None:
+        return "AVAILABLE"
+    return availability.get(key, {}).get("status", "UNKNOWN")
 
 
 # ----------------------------------------------------------------------------- packages
@@ -112,17 +166,26 @@ def package_attrs(packages: list[dict], done: set[str] | None = None) -> dict[st
 
 
 def build_request(packages: list[dict], engines: dict[str, dict], extra_state: dict | None = None,
-                  done: set[str] | None = None, model: str = DEFAULT_MODEL) -> dict[str, Any]:
-    """Compose the System One body: state + one choice question per package."""
-    avail = available_engines(engines)
+                  done: set[str] | None = None, model: str = DEFAULT_MODEL,
+                  availability: dict[str, dict] | None = None) -> dict[str, Any]:
+    """Compose the System One body: state + one choice question per package.
+
+    availability: {engine: {"status": AVAILABLE|EXHAUSTED|UNAVAILABLE|UNKNOWN, "until", ...}} from
+    `jbr probe`; engines that are not usable are described to Jev but never offered as answers."""
+    avail = usable_engines(engines, availability)
     if not avail:
         raise ValueError("no engine is available; use --available <engine>=yes")
     state: dict[str, Any] = {
         "goal": DEFAULT_GOAL,
-        "engines": {k: engine_description(k, e) for k, e in engines.items()},
+        "engines": {k: engine_description(k, e, None if availability is None else availability.get(k, {}))
+                    for k, e in engines.items()},
         "packages": package_attrs(packages, done),
         "scheduling_note": SCHEDULING_NOTE,
     }
+    if any("priority" in e for e in engines.values()):
+        state["routing_policy"] = CHAIN_POLICY
+        state["engine_chain"] = [{"engine": k, "priority": engines[k].get("priority"),
+                                  "live_status": live_status(k, engines, availability)} for k in by_priority(engines)]
     state.update(extra_state or {})
     questions = {}
     for wp in state["packages"]:
@@ -132,6 +195,8 @@ def build_request(packages: list[dict], engines: dict[str, dict], extra_state: d
                 f"Which engine in `engines` should implement package {wp} (`packages.{wp}`), given its numerical "
                 "difficulty, dependency depth (start time), sign-convention criticality, the engines' availability "
                 "and observed quality/speed, and the goal? Only engines marked available may be chosen."
+                + (" Follow `routing_policy`: prefer the highest-priority available engine in `engine_chain` unless "
+                   "this package's hints clearly favour another available one." if "routing_policy" in state else "")
             ),
             "criteria": {k: None for k in avail},
         }
@@ -149,17 +214,19 @@ def _post(body: dict, api_key: str, timeout: int = 90) -> dict:
 def route(project_root: str | os.PathLike, packages: list[dict], engines: dict[str, dict],
           extra_state: dict | None = None, *, done: set[str] | None = None, api_key: str | None = None,
           dry_run: bool = False, post: Callable[[dict, str], dict] | None = None,
-          model: str = DEFAULT_MODEL, write: bool = True) -> dict[str, Any]:
+          model: str = DEFAULT_MODEL, write: bool = True,
+          availability: dict[str, dict] | None = None) -> dict[str, Any]:
     """Route every not-done package to an engine. Returns the routing document.
 
     dry_run: return {"dry_run": True, "request": body} without calling the API.
     Single available engine: no API call, everything routed there with p=1.
+    availability: live probe results (jbr/state.py); unusable engines are never routed to.
     """
-    body = build_request(packages, engines, extra_state, done, model)
+    body = build_request(packages, engines, extra_state, done, model, availability)
     if dry_run:
         return {"dry_run": True, "request": body}
 
-    avail = list(available_engines(engines))
+    avail = list(usable_engines(engines, availability))
     routing: dict[str, dict] = {}
     if len(avail) == 1:
         only = avail[0]
@@ -175,9 +242,17 @@ def route(project_root: str | os.PathLike, packages: list[dict], engines: dict[s
             ans = out["answers"][f"engine_{wp}"]
             routing[wp] = {"engine": ans["choice"], "confidence": ans.get("confidence"),
                            "probabilities": ans.get("probabilities", {})}
+            if ans["choice"] not in avail:  # never route to an exhausted/unavailable engine, whatever came back
+                routing[wp]["engine"] = next(k for k in by_priority(engines) if k in avail)
+                routing[wp]["overridden"] = f"Jev chose unusable engine {ans['choice']!r}"
         model_used = out.get("model", model)
 
-    doc = {"model": model_used, "state": body["state"], "routing": routing}
+    for r in routing.values():
+        r["chain"] = chain_for(r["engine"], engines, availability)
+    doc = {"model": model_used, "state": body["state"], "routing": routing,
+           "chains": {wp: r["chain"] for wp, r in routing.items()}}
+    if availability is not None:
+        doc["availability"] = availability
     if write:
         path = pathlib.Path(project_root) / ROUTING_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +269,15 @@ def load_routing(project_root: str | os.PathLike) -> dict[str, str]:
     return {wp: r["engine"] for wp, r in doc.get("routing", {}).items()}
 
 
+def load_chains(project_root: str | os.PathLike) -> dict[str, list[str]]:
+    """{WP: [engine, ...]} fallback chains from ops/routing.json (pre-chain files: [engine])."""
+    path = pathlib.Path(project_root) / ROUTING_FILE
+    if not path.exists():
+        return {}
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    return {wp: list(r.get("chain") or [r["engine"]]) for wp, r in doc.get("routing", {}).items()}
+
+
 def format_routing(doc: dict) -> str:
     lines = []
     for wp, r in doc["routing"].items():
@@ -201,5 +285,6 @@ def format_routing(doc: dict) -> str:
         conf = r.get("confidence")
         ptxt = f"p={p:.2f}" if isinstance(p, (int, float)) else "p=?"
         ctxt = f"conf={conf:.2f}" if isinstance(conf, (int, float)) else "conf=?"
-        lines.append(f"{wp}: {r['engine']} ({ptxt}, {ctxt})")
+        chain = f" chain: {' > '.join(r['chain'])}" if r.get("chain") else ""
+        lines.append(f"{wp}: {r['engine']} ({ptxt}, {ctxt}){chain}")
     return "\n".join(lines)

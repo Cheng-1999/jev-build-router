@@ -115,7 +115,8 @@ def test_compose_fix_writes_no_fix_file_for_blocked_rows(project):
 # ----------------------------------------------------------------------------- workflows
 
 needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
-EXT = {"root": "C:\\p", "jbr": "/c/jbr", "routing": {"WP01": "agy_gemini_pro"}}
+EXT = {"root": "C:\\p", "jbr": "/c/jbr", "routing": {"WP01": "agy_gemini_pro"},
+       "engineChain": ["agy_gemini_pro"]}  # pre-chain shape: routed engine, then fallbackEngine only
 FIX_REVIEW = {"wp": "WP01", "pytest_summary": "1 failed, 4 passed", "test_count": 5, "passed_criteria": [],
               "failures": [{"criterion": "sign()", "severity": "high", "evidence": "returns 0", "fix": "+1/-1"}],
               "mutation_check": "", "ownership_violations": [], "verdict": "fix"}
@@ -176,15 +177,29 @@ def test_build_dag_fix_quota_does_not_consume_the_fix_round():
 
 
 @needs_node
-def test_build_dag_quota_is_sticky_across_packages_but_crash_is_not():
+def test_build_dag_quota_is_not_a_run_wide_skip_the_probe_decides():
+    # 2026-10-02: the permanent in-run EXHAUSTED set is gone. WP02's step asks the runner again; the
+    # runner's `jbr probe` gate reports 'quota' while the engine is out (no spawn) and 'ok' once it reset.
     pk = [{"id": "WP01", "depends_on": []}, {"id": "WP02", "depends_on": ["WP01"]}]
     routing = {"WP01": "agy_gemini_pro", "WP02": "agy_gemini_pro"}
+    probe_quota = dict(run_stub("WP02", "quota", "2026-10-02T05:00:00Z"), probe="EXHAUSTED 2026-10-02T05:00:00Z")
     rc, out = run_workflow(BUILD_DAG, dict(EXT, packages=pk, routing=routing),
-                           {"runs": {"impl:WP01:agy_gemini_pro": run_stub("WP01", "quota")}})
+                           {"runs": {"impl:WP01:agy_gemini_pro": run_stub("WP01", "quota"),
+                                     "impl:WP02:agy_gemini_pro": probe_quota}})
     assert rc == 0
-    assert "impl:WP02:agy_gemini_pro" not in out["calls"] and "impl:WP02:fallback" in out["calls"]
-    assert any("WP02: implement: skipping agy_gemini_pro (quota exhausted" in m for m in out["logs"])
+    assert "impl:WP02:agy_gemini_pro" in out["calls"] and "impl:WP02:fallback" in out["calls"]
+    wp02 = out["result"][1]
+    assert wp02["history"][0]["engines"][0] == {"engine": "agy_gemini_pro", "status": "quota",
+                                                "reset_hint": "2026-10-02T05:00:00Z", "probe": "EXHAUSTED 2026-10-02T05:00:00Z"}
+    assert any("[probe: EXHAUSTED 2026-10-02T05:00:00Z]" in m for m in out["logs"])
     assert [r["final"] for r in out["result"]] == ["accept", "accept"]
+    # quota reset between WP01 and WP02: WP02 runs on agy again, no fallback
+    rc, out = run_workflow(BUILD_DAG, dict(EXT, packages=pk, routing=routing),
+                           {"runs": {"impl:WP01:agy_gemini_pro": run_stub("WP01", "quota"),
+                                     "impl:WP02:agy_gemini_pro": run_stub("WP02", "ok")}})
+    assert rc == 0
+    assert "impl:WP01:fallback" in out["calls"] and "impl:WP02:fallback" not in out["calls"]
+    assert out["result"][1]["history"][0]["engines"] == [{"engine": "agy_gemini_pro", "status": "ok", "reset_hint": ""}]
     # crash is package-local: WP02 still tries agy first
     rc, out = run_workflow(BUILD_DAG, dict(EXT, packages=pk, routing=routing),
                            {"runs": {"impl:WP01:agy_gemini_pro": run_stub("WP01", "crash")}})

@@ -1,6 +1,16 @@
 // Claude Code Workflow script: dependency-aware parallel build of work packages.
 // Implement (Claude subagent or external engine via jbr), fresh-context review, adversarial
-// refutation, fix loop, per package. Everything project-specific comes from `args`:
+// refutation, fix loop, per package.
+//
+// Engine chain: every implement/fix step walks the package's chain (default agy_gemini_pro >
+// agy_claude_opus > codex_astra > claude_subagent). Before spawning an external engine its runner
+// agent runs `python -m jbr probe <engine>` (shared state file ~/.jbr/engine_state.json + a cheap
+// live probe, AVAILABLE cached 10 min): EXHAUSTED/UNAVAILABLE -> engine_status 'quota' without
+// spawning, and the step moves to the next engine. There is NO run-wide skip list: every step
+// asks `jbr probe` again, so an engine whose quota has reset is preferred again later in the
+// same run. Quota/crash runs are never reviewed and never consume a fix round.
+//
+// Everything project-specific comes from `args`:
 //
 // args = {
 //   root: 'C:\\path\\to\\project',            // Windows or POSIX path (required)
@@ -8,9 +18,13 @@
 //   jbr: '/c/path/to/jev-build-router',       // POSIX path of this repo (required when any engine is external)
 //   packages: [{ id: 'WP04', depends_on: ['WP03'] }, ...],   // required
 //   done: ['WP01', 'WP02'],                   // already finished (deps satisfied)
-//   routing: { WP04: 'claude_subagent', WP05: 'agy_gemini_pro' },  // from ops/routing.json (default claude_subagent)
+//   routing: { WP04: 'claude_subagent',       // pin: that engine first, then the engineChain entries after it
+//              WP05: ['agy_gemini_pro', 'codex_astra', 'claude_subagent'],  // explicit chain (ops/routing.json .chains)
+//              WP06: 'auto' },                // or no entry at all (the DEFAULT): walk engineChain
+//   engineChain: ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'claude_subagent'],  // default priority order
 //   engineArgs: { agy_gemini_pro: '--timeout 55m' },   // extra `python -m jbr spawn` args per engine (optional)
-//   fallbackEngine: 'claude_subagent',        // takes over an implement/fix step whose engine hit quota or crashed (default claude_subagent)
+//   jbrArgs: '--engines /c/path/engines.json',          // global jbr options for probe + spawn (optional)
+//   fallbackEngine: 'claude_subagent',        // appended to every chain as the last resort (default claude_subagent)
 //   maxFixRounds: 2,
 //   promptsDir: 'ops/prompts', reportsDir: 'ops/reports',
 //   testCmd: 'python -m pytest -q',           // run from posixRoot
@@ -46,29 +60,58 @@ const PKGS = Object.fromEntries(A.packages.map(p => [p.id, p.depends_on || []]))
 const DONE = new Set(A.done || [])
 const ROUTING = A.routing || {}
 const ENGINE_ARGS = A.engineArgs || {}
+const JBR_ARGS = A.jbrArgs ? ' ' + A.jbrArgs : ''
 const RUN_PREFIX = 'run'
-const engineOf = id => ROUTING[id] || 'claude_subagent'
-const FALLBACK = A.fallbackEngine || 'claude_subagent'
-// engines that reported quota in this run: later steps (any package) skip straight to the fallback
-const EXHAUSTED = new Set()
-const external = id => engineOf(id) !== 'claude_subagent'
-if (Object.keys(PKGS).some(external) && !JBR) throw new Error('args.jbr (POSIX path of jev-build-router) is required when a package is routed to an external engine')
+const LAST_RESORT = 'claude_subagent'
+const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', LAST_RESORT]
+const ENGINE_CHAIN = Array.isArray(A.engineChain) && A.engineChain.length ? A.engineChain : DEFAULT_CHAIN
+const FALLBACK = A.fallbackEngine || LAST_RESORT
+const isExternal = e => e !== LAST_RESORT
+const uniq = xs => [...new Set(xs.filter(Boolean))]
+// chain-derived engines (auto / after a pin) need args.jbr when external; without it they are dropped
+const fromChain = es => JBR ? es : es.filter(e => !isExternal(e))
+if (!JBR && ENGINE_CHAIN.some(isExternal)) log(`args.jbr not set: external engines dropped from the engine chain (${ENGINE_CHAIN.filter(isExternal).join(', ')}); auto-routed packages run on ${LAST_RESORT}`)
+// routing entry per package: string (pin, then the chain after it) | array (explicit chain) | 'auto' / missing (whole chain)
+function chainFor(id) {
+  const r = ROUTING[id]
+  let c
+  if (Array.isArray(r) && r.length) c = r
+  else if (!r || r === 'auto') c = fromChain(ENGINE_CHAIN)
+  else {
+    const i = ENGINE_CHAIN.indexOf(r)
+    c = [r, ...fromChain(i >= 0 ? ENGINE_CHAIN.slice(i + 1) : ENGINE_CHAIN)]
+  }
+  return uniq([...c, FALLBACK])
+}
+const CHAINS = Object.fromEntries(Object.keys(PKGS).map(id => [id, chainFor(id)]))
+const engineOf = id => CHAINS[id][0]
+if (!JBR && Object.values(CHAINS).some(c => c.some(isExternal))) throw new Error('args.jbr (POSIX path of jev-build-router) is required when a package is routed to an external engine')
 // every dependency must be a package in this run or already done; a silent drop would start a package with its dep unbuilt
 for (const [id, deps] of Object.entries(PKGS)) for (const d of deps) if (!DONE.has(d) && !PKGS[d]) throw new Error(`unknown dependency ${d} of ${id}: not in args.packages or args.done`)
 
 const specPath = id => join(PROMPTS, `${id}.md`)
 const runStem = (id, tag) => `${RUN_PREFIX}-${id}${tag ? '-' + tag : ''}`
 
-const runnerPrompt = (id, eng, tag, extraFile) => {
+const runnerPrompt = (id, eng, tag, extraFile, extraText) => {
   const stem = runStem(id, tag)
   const extra = extraFile ? ` --extra-file "${extraFile}"` : ''
   const engArgs = ENGINE_ARGS[eng] ? ' ' + ENGINE_ARGS[eng] : ''
-  return `You are the runner for work package ${id} on the external engine "${eng}". You do NOT write code yourself; you launch the engine, wait for it, and report.
-1. cd ${POSIX} && PYTHONPATH="${JBR}" python -m jbr --project "${POSIX}" spawn ${id} --engine ${eng}${tag ? ' --tag ' + tag : ''}${extra}${engArgs}
+  const writeFix = extraFile ? `
+0b. Write the text between the two marker lines below verbatim to the file ${join(extraFile)} (create it; overwrite if present; marker lines excluded).
+<<<<<<<< FIX INSTRUCTIONS
+${extraText}
+>>>>>>>> FIX INSTRUCTIONS` : ''
+  return `You are the runner for work package ${id} on the external engine "${eng}". You do NOT write code yourself; you check the engine, launch it, wait for it, and report.
+0. Availability gate (cheap; never skip it): cd ${POSIX} && PYTHONPATH="${JBR}" python -m jbr${JBR_ARGS} probe ${eng}; echo "probe-exit=$?"
+   It prints AVAILABLE (exit 0), EXHAUSTED <until> (exit 3: out of quota until that UTC time) or UNAVAILABLE <reason> (exit 4).
+   Exit 3 or 4: STOP HERE. Do not spawn, do not run tests. Return engine_status 'quota', reset_hint = the text after EXHAUSTED/UNAVAILABLE, probe = the whole probe line, pytest_summary 'no engine work: probe <EXHAUSTED|UNAVAILABLE>', files_created_or_changed [], unsatisfied [], notes = the probe line.
+   Any other exit (jbr itself failed): return engine_status 'crash' with the output in notes. Exit 0: continue.${writeFix}
+1. cd ${POSIX} && PYTHONPATH="${JBR}" python -m jbr${JBR_ARGS} --project "${POSIX}" spawn ${id} --engine ${eng}${tag ? ' --tag ' + tag : ''}${extra}${engArgs}
    (returns immediately and prints the marker path ${REPORTS}/${stem}.done)
 2. Wait for the marker with repeated Bash calls, each: cd ${POSIX} && for i in $(seq 1 17); do [ -f ${REPORTS}/${stem}.done ] && break; sleep 30; done; cat ${REPORTS}/${stem}.done 2>/dev/null || echo STILL-RUNNING
    Repeat until it prints an exit code (up to 8 times, ~70 minutes). The marker reads "<exit> <minutes>min <STATUS> [reset-hint]": STATUS QUOTA = the engine hit its quota (429 / RESOURCE_EXHAUSTED / fast exit with no work) and did nothing; CRASH = it died without output; OK = it ran. A marker with only two tokens: exit -1 is CRASH, anything else OK. No marker after 8 waits and no agy/codex process running: CRASH.
 3. Only if STATUS is OK: cd ${POSIX} && ${TEST_CMD} 2>&1 | tail -5 ; and read the last 60 lines of ${REPORTS}/${stem}.log. Otherwise do NOT run tests; read the last 20 lines of the log for the notes.
+A QUOTA run is already recorded in the engine state file by jbr (later probes say EXHAUSTED until the reset).
 Return: engine_status ('ok' | 'quota' | 'crash', from STATUS), reset_hint (the text after STATUS, else ''), the engine's final test summary (or 'no engine work: <status>'), the files it says it created/changed, any acceptance items it reported as unsatisfied, and the exit code in notes.`
 }
 
@@ -79,7 +122,7 @@ const IMPL_SCHEMA = { type: 'object', properties: {
   notes: { type: 'string' } }, required: ['wp', 'pytest_summary', 'files_created_or_changed', 'unsatisfied', 'notes'] }
 // external engine runs also report whether the engine did any work at all
 const RUNNER_SCHEMA = { type: 'object', properties: { ...IMPL_SCHEMA.properties,
-  engine_status: { type: 'string', enum: ['ok', 'quota', 'crash'] }, reset_hint: { type: 'string' } },
+  engine_status: { type: 'string', enum: ['ok', 'quota', 'crash'] }, reset_hint: { type: 'string' }, probe: { type: 'string' } },
   required: [...IMPL_SCHEMA.required, 'engine_status'] }
 const REVIEW_SCHEMA = { type: 'object', properties: {
   wp: { type: 'string' }, pytest_summary: { type: 'string' }, test_count: { type: 'number' },
@@ -144,37 +187,32 @@ async function runOn(id, eng, kind, round, findings, fallback) {
       ? agent(implPrompt(id), { label: `impl:${id}${sfx}`, phase: ph, schema: IMPL_SCHEMA, effort: 'high' })
       : agent(fixPrompt(id, round, findings), { label: `fix:${id}:r${round}${sfx}`, phase: ph, schema: IMPL_SCHEMA, effort: 'high' })
   }
-  // fallback runs get their own marker/log so the dead primary run stays inspectable
-  const tag = [kind === 'impl' ? '' : `fix${round}`, fallback ? 'fb' : ''].filter(Boolean).join('-')
-  let extraFile = ''
-  if (kind === 'fix') {
-    extraFile = `${REPORTS}/fix-${id}-round${round}.md`
-    await agent(`Write the following text verbatim to the file ${join(extraFile)} (create it; overwrite if present) and return 'ok':\n\n${fixPrompt(id, round, findings)}`, { label: `fixfile:${id}:r${round}${sfx}`, phase: ph, effort: 'low' })
-  }
+  // fallback runs get their own marker/log per engine (run-WP-fb-<engine>) so every dead run stays inspectable
+  const tag = [kind === 'impl' ? '' : `fix${round}`, fallback ? 'fb-' + eng : ''].filter(Boolean).join('-')
+  // the runner writes the fix file itself, after the probe: an exhausted engine costs one cheap agent call
+  const extraFile = kind === 'fix' ? `${REPORTS}/fix-${id}-round${round}.md` : ''
   const label = kind === 'impl' ? `impl:${id}:${eng}${sfx}` : `fix:${id}:r${round}:${eng}${sfx}`
-  return agent(runnerPrompt(id, eng, tag, extraFile), { label, phase: ph, schema: RUNNER_SCHEMA, effort: 'low' })
+  return agent(runnerPrompt(id, eng, tag, extraFile, kind === 'fix' ? fixPrompt(id, round, findings) : ''), { label, phase: ph, schema: RUNNER_SCHEMA, effort: 'low' })
 }
 
-// Routed engine first, then FALLBACK. A quota/crash run did no work: it is never reviewed and never
-// counts as a fix round. Returns { res, tried, worked }; worked=false means no engine could run the step.
+// Walk the package's engine chain. An external engine's runner probes it first (`jbr probe`) and
+// reports 'quota' without spawning when it is EXHAUSTED/UNAVAILABLE. A quota/crash run did no work:
+// it is never reviewed and never counts as a fix round. Every step starts again at the top of the
+// chain, so a recovered engine is used again. Returns { res, tried, worked }; worked=false: no engine ran.
 async function step(id, kind, round, findings) {
   const what = kind === 'impl' ? 'implement' : `fix round ${round}`
   const tried = []
-  for (const eng of [...new Set([engineOf(id), FALLBACK])]) {
-    const fallback = eng !== engineOf(id)
-    if (EXHAUSTED.has(eng)) {
-      log(`${id}: ${what}: skipping ${eng} (quota exhausted earlier in this run)`)
-      tried.push({ engine: eng, status: 'quota', skipped: true })
-      continue
-    }
+  for (const [i, eng] of CHAINS[id].entries()) {
+    const fallback = i > 0
     if (fallback) log(`${id}: ${what}: falling back to ${eng}`)
     const res = await runOn(id, eng, kind, round, findings, fallback)
     const st = statusOf(res)
     const hint = (res && res.reset_hint) || ''
-    tried.push({ engine: eng, status: st, reset_hint: hint })
+    const t = { engine: eng, status: st, reset_hint: hint }
+    if (st !== 'ok' && res && res.probe) t.probe = res.probe  // stopped by the availability gate, never spawned
+    tried.push(t)
     if (st === 'ok') return { res, tried, worked: true }
-    if (st === 'quota') EXHAUSTED.add(eng)
-    log(`${id}: ${what} on ${eng} -> ${st}${hint ? ' (resets in ' + hint + ')' : ''}: engine did no work; not reviewed, fix round not consumed`)
+    log(`${id}: ${what} on ${eng} -> ${st}${t.probe ? ' [probe: ' + t.probe + ']' : hint ? ' (resets in ' + hint + ')' : ''}: engine did no work; not reviewed, fix round not consumed`)
   }
   return { res: null, tried, worked: false }
 }
@@ -182,11 +220,11 @@ async function step(id, kind, round, findings) {
 const triedText = tried => tried.map(t => `${t.engine}=${t.status}`).join(', ')
 
 async function build(id) {
-  log(`${id}: implementing on ${engineOf(id)}`)
+  log(`${id}: implementing; engine chain ${CHAINS[id].join(' > ')}`)
   const s = await step(id, 'impl', 0, [])
   const impl = s.res
   const history = [{ stage: 'impl', engines: s.tried, summary: impl ? impl.pytest_summary : (s.worked ? 'implementer crashed' : 'no engine did any work'), unsatisfied: impl ? impl.unsatisfied : [] }]
-  const row = (final, round, r, extra) => ({ wp: id, engine: engineOf(id), final, rounds: round, history,
+  const row = (final, round, r, extra) => ({ wp: id, engine: engineOf(id), chain: CHAINS[id], final, rounds: round, history,
     unresolved: final === 'accept' ? [] : (r ? r.confirmed : []), low_open: r ? r.low : [],
     mutation: r && r.rev ? r.rev.mutation_check : '', ownership: r && r.rev ? r.rev.ownership_violations : [], ...extra })
   if (!s.worked) {

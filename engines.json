@@ -1,19 +1,21 @@
 {
   "claude_subagent": {
-    "description": "Claude Code workflow subagent (strongest Claude model in the session, effort high). Runs many packages in parallel inside workflows/build_dag.js, no quota problem observed. Reviewer agents are the same model family, so reviewer and implementer share blind spots.",
+    "description": "Claude Code workflow subagent (strongest Claude model in the session, effort high). Runs many packages in parallel inside workflows/build_dag.js, no quota problem observed. Reviewer agents are the same model family, so reviewer and implementer share blind spots. Last resort of the engine chain: never quota-probed, always available.",
     "runner": "claude_subagent",
     "model": "claude (session model)",
     "effort": "high",
     "parallel_limit": 8,
-    "available": true
+    "available": true,
+    "priority": 4
   },
   "agy_claude_opus": {
-    "description": "agy CLI on claude-opus-4-6-thinking. Observed: ~11 min per package, ~2 confirmed defects, but quota exhausts after ~2 runs and stalls ~90 minutes. Same family as the Claude reviewers.",
+    "description": "agy CLI on claude-opus-4-6-thinking. Observed: ~11 min per package, ~2 confirmed defects, but quota exhausts after ~2 runs and stalls ~90 minutes. Same family as the Claude reviewers. Shares one Claude quota bucket with every other agy Claude engine (state file key agy_claude).",
     "runner": "agy",
     "model": "claude-opus-4-6-thinking",
     "effort": "high",
     "parallel_limit": 2,
-    "available": false
+    "available": true,
+    "priority": 2
   },
   "agy_gemini_pro": {
     "description": "agy CLI on gemini-3.1-pro-high. Observed: ~6 min per package, each package tends to need one fix round with 4-9 confirmed defects (spec-literal misses: missing validators, stubbed functions, weakened tests). Different model family from the reviewers, so its errors get caught rather than shared.",
@@ -21,7 +23,8 @@
     "model": "gemini-3.1-pro-high",
     "effort": "high",
     "parallel_limit": 3,
-    "available": true
+    "available": true,
+    "priority": 1
   },
   "codex_astra": {
     "description": "OpenAI Codex CLI on gpt-6-astra, effort high, can spawn its own subagents. Usage limits hit easily; third model family, useful diversity for review-heavy or late packages.",
@@ -29,6 +32,7 @@
     "model": "gpt-6-astra",
     "effort": "high",
     "parallel_limit": 2,
-    "available": false
+    "available": true,
+    "priority": 3
   }
 }

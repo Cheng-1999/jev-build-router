@@ -27,7 +27,8 @@ def test_module_entrypoint_help():
 def test_route_dry_run_prints_questions_without_api(project, capsys, monkeypatch):
     monkeypatch.setattr(router.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no API")))
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    rc = cli.main(["--project", str(project), "--available", "codex_astra=yes", "route", "--dry-run", "--done", "WP01", "--now", "04:15"])
+    rc = cli.main(["--project", str(project), "--available", "codex_astra=yes", "--available", "agy_claude_opus=no",
+                   "route", "--dry-run", "--done", "WP01", "--now", "04:15"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "[dry-run] would POST" in out

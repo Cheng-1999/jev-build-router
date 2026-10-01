@@ -256,6 +256,7 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
         status, hint = classify_run(p.returncode, dt, paths["log"].read_text(encoding="utf-8", errors="replace"))
         paths["done"].write_text(f"{p.returncode} {dt:.1f}min {status}{' ' + hint if hint else ''}\n", encoding="utf-8")
         result.update(exit=p.returncode, minutes=round(dt, 1), status=status.lower(), reset_hint=hint)
+        _record_engine_state(engine_key, engine, status, hint, paths["log"], result)
         return result
     except Exception:
         if dry_run:
@@ -266,6 +267,24 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
             fh.write(f"\n# jbr run {wp_id} engine={engine_key} CRASHED after {dt:.1f}min\n{tb}")
         paths["done"].write_text(f"-1 {dt:.1f}min\n", encoding="utf-8")
         raise
+
+
+def _record_engine_state(engine_key: str, engine: dict, status: str, hint: str, log: pathlib.Path,
+                         result: dict[str, Any]) -> None:
+    """Feed the run's outcome into the shared engine state (jbr/state.py) so `jbr probe` / `pick`
+    and build_dag.js skip a quota-exhausted engine until its reset time. QUOTA -> exhausted_until
+    from the reset hint (unparseable -> +30 min); OK -> AVAILABLE. Never fails the run."""
+    if status not in {"QUOTA", "OK"}:
+        return
+    try:
+        from jbr import state
+        if status == "QUOTA":
+            result["exhausted_until"] = state.iso(state.mark_exhausted(engine_key, engine, hint))
+        else:
+            state.record(engine_key, engine, state.AVAILABLE)
+    except Exception as e:  # state file trouble must not turn a finished run into a crash
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"\n# jbr: could not update engine state: {e!r}\n")
 
 
 def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag: str = "",

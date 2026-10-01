@@ -1,4 +1,4 @@
-"""python -m jbr route|run|spawn|wait|compose-fix|status
+"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick
 
 Global options (before the subcommand):
   --project <root>          project root (default: cwd)
@@ -6,6 +6,10 @@ Global options (before the subcommand):
   --prompts <dir>           per-package spec dir, relative to project (default ops/prompts)
   --engines <path>          engines.json (default: the one shipped with jbr)
   --available eng=yes|no    override an engine's availability (repeatable)
+
+Engine chain: `probe <engine>` prints AVAILABLE (exit 0) | EXHAUSTED <until> (exit 3) |
+UNAVAILABLE <reason> (exit 4) from the shared state file ($JBR_STATE, default ~/.jbr/engine_state.json)
+or one cheap live probe; `pick [--exclude a,b]` prints the first available engine by priority.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from jbr import router, runner
+from jbr import router, runner, state
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_ENGINES = REPO_ROOT / "engines.json"
@@ -38,6 +42,8 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--state-json", default=None, help="path to extra state merged into the request")
     r.add_argument("--model", default=router.DEFAULT_MODEL)
     r.add_argument("--no-write", action="store_true", help="do not write ops/routing.json")
+    r.add_argument("--no-probe", action="store_true",
+                   help="use only the engine state file for availability (no live probes; implied by --dry-run)")
 
     x = sub.add_parser("run", help="run one package on an engine synchronously (agy|codex)")
     x.add_argument("wp_id")
@@ -68,6 +74,14 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("round_no", type=int)
 
     sub.add_parser("status", help="list runs and their .done markers")
+
+    pr = sub.add_parser("probe", help="engine availability: AVAILABLE (0) | EXHAUSTED <until> (3) | UNAVAILABLE <reason> (4)")
+    pr.add_argument("engine")
+    pr.add_argument("--no-live", action="store_true", help="state file only; never call the engine (UNKNOWN -> exit 0)")
+
+    pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
+    pk.add_argument("--exclude", default="", help="comma-separated engine keys to skip")
+    pk.add_argument("--no-live", action="store_true", help="state file only; never call an engine")
     return ap
 
 
@@ -104,12 +118,18 @@ def cmd_route(a) -> int:
         extra_state["goal"] = a.goal
     elif meta.get("goal"):
         extra_state["goal"] = meta["goal"]
+    # live availability for the chain: never route to an engine that probes EXHAUSTED/UNAVAILABLE
+    avail = state.availability(engines, live=not (a.dry_run or a.no_probe))
+    for k, v in avail.items():
+        if v["status"] not in router.USABLE_STATUSES:
+            print(f"[jbr route] {k}: {v['status']}" + (f" until {v['until']}" if v.get("until") else "")
+                  + (f" ({v['detail']})" if v.get("detail") else ""), file=sys.stderr)
     doc = router.route(project, packages, engines, extra_state, done=set(a.done), dry_run=a.dry_run,
-                       model=a.model, write=not a.no_write)
+                       model=a.model, write=not a.no_write, availability=avail)
     if doc.get("dry_run"):
         req = doc["request"]
         print(f"[dry-run] would POST to {router.TYPESAFE_URL} model={req['model']}")
-        print(f"[dry-run] criteria (available engines): {list(router.available_engines(engines))}")
+        print(f"[dry-run] criteria (available engines): {list(router.usable_engines(engines, avail))}")
         print(json.dumps(req["questions"], indent=2))
         return 0
     print(router.format_routing(doc))
@@ -170,10 +190,26 @@ def cmd_spawn(a) -> int:
     return rc
 
 
+def cmd_probe(a) -> int:
+    r = state.probe(a.engine, _engines(a), live=not a.no_live)
+    print(r.line())
+    return r.exit_code
+
+
+def cmd_pick(a) -> int:
+    exclude = {e.strip() for e in a.exclude.split(",") if e.strip()}
+    key, seen = state.pick(_engines(a), exclude, live=not a.no_live)
+    for r in seen:
+        if r.engine != key:
+            print(f"[jbr pick] {r.engine}: {r.line()}", file=sys.stderr)
+    print(key)
+    return 0
+
+
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
 # sub-options that take one value: the token after them is a VALUE, never a global option
 VALUE_OPTS = {"--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
-              "--model", "--timeout-min", "--poll"}
+              "--model", "--timeout-min", "--poll", "--exclude"}
 
 
 def _hoist_globals(argv: list[str]) -> list[str]:
@@ -181,7 +217,7 @@ def _hoist_globals(argv: list[str]) -> list[str]:
     if not argv:
         return argv
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
-                    {"route", "run", "spawn", "wait", "compose-fix", "status"}), None)
+                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
@@ -253,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = _hoist_globals(list(sys.argv[1:] if argv is None else argv))
     a = _parser().parse_args(argv)
     return {"route": cmd_route, "run": cmd_run, "spawn": cmd_spawn, "wait": cmd_wait,
-            "compose-fix": cmd_compose_fix, "status": cmd_status}[a.cmd](a)
+            "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick}[a.cmd](a)
 
 
 if __name__ == "__main__":
