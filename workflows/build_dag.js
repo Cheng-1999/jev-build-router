@@ -10,6 +10,7 @@
 //   done: ['WP01', 'WP02'],                   // already finished (deps satisfied)
 //   routing: { WP04: 'claude_subagent', WP05: 'agy_gemini_pro' },  // from ops/routing.json (default claude_subagent)
 //   engineArgs: { agy_gemini_pro: '--timeout 55m' },   // extra `python -m jbr spawn` args per engine (optional)
+//   fallbackEngine: 'claude_subagent',        // takes over an implement/fix step whose engine hit quota or crashed (default claude_subagent)
 //   maxFixRounds: 2,
 //   promptsDir: 'ops/prompts', reportsDir: 'ops/reports',
 //   testCmd: 'python -m pytest -q',           // run from posixRoot
@@ -47,6 +48,9 @@ const ROUTING = A.routing || {}
 const ENGINE_ARGS = A.engineArgs || {}
 const RUN_PREFIX = 'run'
 const engineOf = id => ROUTING[id] || 'claude_subagent'
+const FALLBACK = A.fallbackEngine || 'claude_subagent'
+// engines that reported quota in this run: later steps (any package) skip straight to the fallback
+const EXHAUSTED = new Set()
 const external = id => engineOf(id) !== 'claude_subagent'
 if (Object.keys(PKGS).some(external) && !JBR) throw new Error('args.jbr (POSIX path of jev-build-router) is required when a package is routed to an external engine')
 // every dependency must be a package in this run or already done; a silent drop would start a package with its dep unbuilt
@@ -55,8 +59,7 @@ for (const [id, deps] of Object.entries(PKGS)) for (const d of deps) if (!DONE.h
 const specPath = id => join(PROMPTS, `${id}.md`)
 const runStem = (id, tag) => `${RUN_PREFIX}-${id}${tag ? '-' + tag : ''}`
 
-const runnerPrompt = (id, tag, extraFile) => {
-  const eng = engineOf(id)
+const runnerPrompt = (id, eng, tag, extraFile) => {
   const stem = runStem(id, tag)
   const extra = extraFile ? ` --extra-file "${extraFile}"` : ''
   const engArgs = ENGINE_ARGS[eng] ? ' ' + ENGINE_ARGS[eng] : ''
@@ -64,9 +67,9 @@ const runnerPrompt = (id, tag, extraFile) => {
 1. cd ${POSIX} && PYTHONPATH="${JBR}" python -m jbr --project "${POSIX}" spawn ${id} --engine ${eng}${tag ? ' --tag ' + tag : ''}${extra}${engArgs}
    (returns immediately and prints the marker path ${REPORTS}/${stem}.done)
 2. Wait for the marker with repeated Bash calls, each: cd ${POSIX} && for i in $(seq 1 17); do [ -f ${REPORTS}/${stem}.done ] && break; sleep 30; done; cat ${REPORTS}/${stem}.done 2>/dev/null || echo STILL-RUNNING
-   Repeat until it prints an exit code (up to 8 times, ~70 minutes). If no agy/codex process is running and there is still no marker, report a crash. Exit 124 or an empty log usually means the engine's quota is exhausted: report that verbatim.
-3. Then: cd ${POSIX} && ${TEST_CMD} 2>&1 | tail -5 ; and read the last 60 lines of ${REPORTS}/${stem}.log.
-Return: the engine's final test summary, the files it says it created/changed, any acceptance items it reported as unsatisfied, and whether the run exited 0.`
+   Repeat until it prints an exit code (up to 8 times, ~70 minutes). The marker reads "<exit> <minutes>min <STATUS> [reset-hint]": STATUS QUOTA = the engine hit its quota (429 / RESOURCE_EXHAUSTED / fast exit with no work) and did nothing; CRASH = it died without output; OK = it ran. A marker with only two tokens: exit -1 is CRASH, anything else OK. No marker after 8 waits and no agy/codex process running: CRASH.
+3. Only if STATUS is OK: cd ${POSIX} && ${TEST_CMD} 2>&1 | tail -5 ; and read the last 60 lines of ${REPORTS}/${stem}.log. Otherwise do NOT run tests; read the last 20 lines of the log for the notes.
+Return: engine_status ('ok' | 'quota' | 'crash', from STATUS), reset_hint (the text after STATUS, else ''), the engine's final test summary (or 'no engine work: <status>'), the files it says it created/changed, any acceptance items it reported as unsatisfied, and the exit code in notes.`
 }
 
 const IMPL_SCHEMA = { type: 'object', properties: {
@@ -74,6 +77,10 @@ const IMPL_SCHEMA = { type: 'object', properties: {
   files_created_or_changed: { type: 'array', items: { type: 'string' } },
   unsatisfied: { type: 'array', items: { type: 'string' } },
   notes: { type: 'string' } }, required: ['wp', 'pytest_summary', 'files_created_or_changed', 'unsatisfied', 'notes'] }
+// external engine runs also report whether the engine did any work at all
+const RUNNER_SCHEMA = { type: 'object', properties: { ...IMPL_SCHEMA.properties,
+  engine_status: { type: 'string', enum: ['ok', 'quota', 'crash'] }, reset_hint: { type: 'string' } },
+  required: [...IMPL_SCHEMA.required, 'engine_status'] }
 const REVIEW_SCHEMA = { type: 'object', properties: {
   wp: { type: 'string' }, pytest_summary: { type: 'string' }, test_count: { type: 'number' },
   passed_criteria: { type: 'array', items: { type: 'string' } },
@@ -126,35 +133,84 @@ async function reviewRound(id, round) {
   return { verdict: confirmed.length ? 'fix' : 'accept', confirmed, low: rev.failures.filter(f => f.severity === 'low'), rev }
 }
 
-async function implement(id) {
-  if (!external(id)) return agent(implPrompt(id), { label: `impl:${id}`, phase: 'Implement', schema: IMPL_SCHEMA, effort: 'high' })
-  return agent(runnerPrompt(id, '', ''), { label: `impl:${id}:${engineOf(id)}`, phase: 'Implement', schema: IMPL_SCHEMA, effort: 'low' })
+const statusOf = res => (res && res.engine_status) || 'ok'  // null (agent crashed) = unknown: keep reviewing
+
+// One implement/fix attempt on one engine. kind: 'impl' | 'fix'.
+async function runOn(id, eng, kind, round, findings, fallback) {
+  const sfx = fallback ? ':fallback' : ''
+  const ph = kind === 'impl' ? 'Implement' : 'Fix'
+  if (eng === 'claude_subagent') {
+    return kind === 'impl'
+      ? agent(implPrompt(id), { label: `impl:${id}${sfx}`, phase: ph, schema: IMPL_SCHEMA, effort: 'high' })
+      : agent(fixPrompt(id, round, findings), { label: `fix:${id}:r${round}${sfx}`, phase: ph, schema: IMPL_SCHEMA, effort: 'high' })
+  }
+  // fallback runs get their own marker/log so the dead primary run stays inspectable
+  const tag = [kind === 'impl' ? '' : `fix${round}`, fallback ? 'fb' : ''].filter(Boolean).join('-')
+  let extraFile = ''
+  if (kind === 'fix') {
+    extraFile = `${REPORTS}/fix-${id}-round${round}.md`
+    await agent(`Write the following text verbatim to the file ${join(extraFile)} (create it; overwrite if present) and return 'ok':\n\n${fixPrompt(id, round, findings)}`, { label: `fixfile:${id}:r${round}${sfx}`, phase: ph, effort: 'low' })
+  }
+  const label = kind === 'impl' ? `impl:${id}:${eng}${sfx}` : `fix:${id}:r${round}:${eng}${sfx}`
+  return agent(runnerPrompt(id, eng, tag, extraFile), { label, phase: ph, schema: RUNNER_SCHEMA, effort: 'low' })
 }
 
-async function fix(id, round, findings) {
-  if (!external(id)) return agent(fixPrompt(id, round, findings), { label: `fix:${id}:r${round}`, phase: 'Fix', schema: IMPL_SCHEMA, effort: 'high' })
-  const extraFile = `${REPORTS}/fix-${id}-round${round}.md`
-  const text = fixPrompt(id, round, findings)
-  await agent(`Write the following text verbatim to the file ${join(extraFile)} (create it; overwrite if present) and return 'ok':\n\n${text}`, { label: `fixfile:${id}:r${round}`, phase: 'Fix', effort: 'low' })
-  return agent(runnerPrompt(id, `fix${round}`, extraFile), { label: `fix:${id}:r${round}:${engineOf(id)}`, phase: 'Fix', schema: IMPL_SCHEMA, effort: 'low' })
+// Routed engine first, then FALLBACK. A quota/crash run did no work: it is never reviewed and never
+// counts as a fix round. Returns { res, tried, worked }; worked=false means no engine could run the step.
+async function step(id, kind, round, findings) {
+  const what = kind === 'impl' ? 'implement' : `fix round ${round}`
+  const tried = []
+  for (const eng of [...new Set([engineOf(id), FALLBACK])]) {
+    const fallback = eng !== engineOf(id)
+    if (EXHAUSTED.has(eng)) {
+      log(`${id}: ${what}: skipping ${eng} (quota exhausted earlier in this run)`)
+      tried.push({ engine: eng, status: 'quota', skipped: true })
+      continue
+    }
+    if (fallback) log(`${id}: ${what}: falling back to ${eng}`)
+    const res = await runOn(id, eng, kind, round, findings, fallback)
+    const st = statusOf(res)
+    const hint = (res && res.reset_hint) || ''
+    tried.push({ engine: eng, status: st, reset_hint: hint })
+    if (st === 'ok') return { res, tried, worked: true }
+    if (st === 'quota') EXHAUSTED.add(eng)
+    log(`${id}: ${what} on ${eng} -> ${st}${hint ? ' (resets in ' + hint + ')' : ''}: engine did no work; not reviewed, fix round not consumed`)
+  }
+  return { res: null, tried, worked: false }
 }
+
+const triedText = tried => tried.map(t => `${t.engine}=${t.status}`).join(', ')
 
 async function build(id) {
   log(`${id}: implementing on ${engineOf(id)}`)
-  const impl = await implement(id)
-  const history = [{ stage: 'impl', summary: impl ? impl.pytest_summary : 'implementer crashed', unsatisfied: impl ? impl.unsatisfied : [] }]
+  const s = await step(id, 'impl', 0, [])
+  const impl = s.res
+  const history = [{ stage: 'impl', engines: s.tried, summary: impl ? impl.pytest_summary : (s.worked ? 'implementer crashed' : 'no engine did any work'), unsatisfied: impl ? impl.unsatisfied : [] }]
+  const row = (final, round, r, extra) => ({ wp: id, engine: engineOf(id), final, rounds: round, history,
+    unresolved: final === 'accept' ? [] : (r ? r.confirmed : []), low_open: r ? r.low : [],
+    mutation: r && r.rev ? r.rev.mutation_check : '', ownership: r && r.rev ? r.rev.ownership_violations : [], ...extra })
+  if (!s.worked) {
+    log(`${id}: BLOCKED: no engine could implement (${triedText(s.tried)})`)
+    return row('blocked', 0, null, { blocked: { stage: 'impl', tried: s.tried } })
+  }
   let round = 1
   let r = await reviewRound(id, round)
   history.push({ stage: `review${round}`, verdict: r.verdict, confirmed: r.confirmed.length, low: r.low.length, tests: r.rev ? r.rev.test_count : 0 })
   while (r.verdict === 'fix' && round <= MAX_FIX_ROUNDS) {
     log(`${id}: review round ${round} -> ${r.confirmed.length} confirmed defects, fixing`)
-    await fix(id, round, r.confirmed.concat(r.low))
+    const f = await step(id, 'fix', round, r.confirmed.concat(r.low))
+    history.push({ stage: `fix${round}`, engines: f.tried })
+    if (!f.worked) {
+      // the last review still describes the code on disk; re-reviewing a dead run would only burn a round
+      log(`${id}: BLOCKED in fix round ${round}: no engine could run it (${triedText(f.tried)})`)
+      return row('blocked', round, r, { blocked: { stage: `fix${round}`, tried: f.tried } })
+    }
     round += 1
     r = await reviewRound(id, round)
     history.push({ stage: `review${round}`, verdict: r.verdict, confirmed: r.confirmed.length, low: r.low.length, tests: r.rev ? r.rev.test_count : 0 })
   }
   log(`${id}: ${r.verdict === 'accept' ? 'ACCEPTED' : 'UNRESOLVED after ' + MAX_FIX_ROUNDS + ' fix rounds'}`)
-  return { wp: id, engine: engineOf(id), final: r.verdict, rounds: round, history, unresolved: r.verdict === 'accept' ? [] : r.confirmed, low_open: r.low, mutation: r.rev ? r.rev.mutation_check : '', ownership: r.rev ? r.rev.ownership_violations : [] }
+  return row(r.verdict, round, r, {})
 }
 
 // DAG scheduler: each package starts the moment all its deps have finished (accepted or not).

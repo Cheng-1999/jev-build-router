@@ -204,6 +204,13 @@ def _hoist_globals(argv: list[str]) -> list[str]:
     return head + hoisted + rest
 
 
+def _status_suffix(d: dict) -> str:
+    """' QUOTA resets=2h9m' / ' CRASH' / ' OK'; empty for markers without a status token."""
+    if "status" not in d:
+        return " CRASH" if d["exit"] == -1 else ""
+    return f" {d['status']}" + (f" resets={d['reset_hint']}" if d.get("reset_hint") else "")
+
+
 def cmd_wait(a) -> int:
     project = pathlib.Path(a.project).resolve()
     state = runner.wait(project, a.wp_ids, a.tag, a.timeout_min * 60, a.poll, a.reports)
@@ -213,7 +220,7 @@ def cmd_wait(a) -> int:
             print(f"{wp}: STILL-RUNNING")
             rc = 124
         else:
-            print(f"{wp}: exit={d['exit']} {d['minutes']}min")
+            print(f"{wp}: exit={d['exit']} {d['minutes']}min{_status_suffix(d)}")
             rc = rc or (d["exit"] if d["exit"] else 0)
     return rc
 
@@ -237,7 +244,7 @@ def cmd_status(a) -> int:
         print("no runs found")
     for r in rows:
         d = r["done"]
-        state = "running" if d is None else f"exit={d['exit']} {d['minutes']}min"
+        state = "running" if d is None else f"exit={d['exit']} {d['minutes']}min{_status_suffix(d)}"
         print(f"{r['wp']}{('-' + r['tag']) if r['tag'] else ''}: {state} log={r['log_bytes']}B")
     return 0
 

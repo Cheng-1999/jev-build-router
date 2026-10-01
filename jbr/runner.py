@@ -3,7 +3,9 @@
 Artifacts under <project_root>/ops/reports/:
   run-<WP>[-tag].prompt.md   the self-contained prompt (engine reads it via a file pointer)
   run-<WP>[-tag].log         engine transcript
-  run-<WP>[-tag].done        "<exit code> <minutes>" once finished
+  run-<WP>[-tag].done        "<exit code> <minutes>min <STATUS> [reset-hint]" once finished;
+                             STATUS = OK | QUOTA | CRASH (classify_run). A jbr crash writes
+                             "-1 <minutes>min" (no status token; engine_status() reads it as crash)
   run-<WP>[-tag].stdout      stdout of a detached (spawned) run
   run-<WP>[-tag].last.md     codex only: final message (-o)
 
@@ -15,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -156,6 +159,48 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
     raise ValueError(f"unknown runner {runner!r} (expected agy|codex|claude_subagent)")
 
 
+# ----------------------------------------------------------------------------- classification
+
+# Quota / rate-limit signatures. agy: `RESOURCE_EXHAUSTED (code 429): Individual quota reached ... Resets in 2h9m31s.`
+# codex: usage-limit refusal ("You've hit your usage limit ... try again at 3:05 PM").
+QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|\"error_code\"\s*:\s*429|\bcode 429\b|quota (?:reached|exceeded|exhausted)"
+                      r"|usage limit|rate[- ]limit(?:ed)? exceeded", re.IGNORECASE)
+RESET_RE = re.compile(r"resets? in ([0-9][0-9hms ]*[hms])|try again (?:at|in) ([^.\n\"]+)", re.IGNORECASE)
+FAST_EXIT_MIN = 1.0   # an engine that finishes this fast...
+NO_WORK_CHARS = 1000  # ...with less transcript than this did no work (quota stall / instant refusal)
+
+
+def classify_run(exit_code: int, minutes: float, log_text: str) -> tuple[str, str]:
+    """(status, reset_hint) for a finished engine run. status: OK | QUOTA | CRASH.
+
+    QUOTA: a quota/429 signature in the transcript, a fast exit (< FAST_EXIT_MIN) with no work, or
+           exit 124 (agy --print-timeout) with an empty transcript.
+    CRASH: jbr itself crashed (exit -1), or a non-zero exit with an empty transcript.
+    OK: the engine ran and produced output (even with a non-zero exit: the review judges it).
+    """
+    body = "\n".join(ln for ln in log_text.splitlines() if not ln.startswith("# ")).strip()
+    if exit_code == -1:
+        return "CRASH", ""
+    stalled = exit_code == 124 and not body  # agy --print-timeout after a silent quota stall (observed ~90 min)
+    if QUOTA_RE.search(log_text) or stalled or (minutes < FAST_EXIT_MIN and len(body) < NO_WORK_CHARS):
+        m = RESET_RE.search(log_text)
+        hint = (m.group(1) or m.group(2)).strip().replace(" ", "") if m else ""
+        return "QUOTA", hint
+    if exit_code != 0 and not body:
+        return "CRASH", ""
+    return "OK", ""
+
+
+def engine_status(done: dict | None) -> str | None:
+    """'ok' | 'quota' | 'crash' from a read_done() dict; None while the run is still going.
+    Markers written before status tokens existed: exit -1 -> crash, anything else -> ok."""
+    if done is None:
+        return None
+    if "status" in done:
+        return done["status"].lower()
+    return "crash" if done["exit"] == -1 else "ok"
+
+
 def _env() -> dict[str, str]:
     return dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
 
@@ -208,8 +253,9 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
             fh.flush()
             p = subprocess.run(cmd, cwd=root, stdout=fh, stderr=subprocess.STDOUT, env=_env())
         dt = (time.time() - t0) / 60
-        paths["done"].write_text(f"{p.returncode} {dt:.1f}min\n", encoding="utf-8")
-        result.update(exit=p.returncode, minutes=round(dt, 1))
+        status, hint = classify_run(p.returncode, dt, paths["log"].read_text(encoding="utf-8", errors="replace"))
+        paths["done"].write_text(f"{p.returncode} {dt:.1f}min {status}{' ' + hint if hint else ''}\n", encoding="utf-8")
+        result.update(exit=p.returncode, minutes=round(dt, 1), status=status.lower(), reset_hint=hint)
         return result
     except Exception:
         if dry_run:
@@ -250,16 +296,21 @@ def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag:
 
 
 def read_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str = "ops/reports") -> dict | None:
-    """Parse a .done marker: {"exit": int, "minutes": float} or None if still running."""
+    """Parse a .done marker: {"exit": int, "minutes": float} or None if still running.
+    Markers carrying a status token add {"status": "OK|QUOTA|CRASH", "reset_hint": str}."""
     marker = report_paths(project_root, wp_id, tag, reports_dir)["done"]
     if not marker.exists():
         return None
     txt = marker.read_text(encoding="utf-8").strip()
     parts = txt.split()
     try:
-        return {"exit": int(parts[0]), "minutes": float(parts[1].rstrip("min")) if len(parts) > 1 else 0.0}
+        d: dict[str, Any] = {"exit": int(parts[0]), "minutes": float(parts[1].rstrip("min")) if len(parts) > 1 else 0.0}
     except (ValueError, IndexError):
         return {"exit": -1, "minutes": 0.0, "raw": txt}
+    if len(parts) > 2:
+        d["status"] = parts[2].upper()
+        d["reset_hint"] = " ".join(parts[3:])
+    return d
 
 
 def wait(project_root: str | os.PathLike, wp_ids: list[str], tag: str = "", timeout_s: float = 70 * 60,

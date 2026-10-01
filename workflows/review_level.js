@@ -9,7 +9,9 @@
 //   ids: ['WP01', 'WP02'],              // required (args must be this object; a bare array has no root)
 //   promptsDir: 'ops/prompts', reportsDir: 'ops/reports',
 //   testCmd: 'python -m pytest -q',
-//   logPrefix: 'run'                    // engine transcript is <reportsDir>/<logPrefix>-<id>.log
+//   logPrefix: 'run',                   // engine transcript is <reportsDir>/<logPrefix>-<id>.log
+//   engineStatus: { WP02: 'quota' }     // optional, from `jbr wait`/`jbr status` (OK|QUOTA|CRASH): a package whose
+//                                       // last engine run did no work is NOT reviewed (verdict 'blocked')
 // }
 export const meta = {
   name: 'jbr-review-level',
@@ -34,6 +36,8 @@ const PROMPTS = A.promptsDir || 'ops/prompts'
 const REPORTS = A.reportsDir || 'ops/reports'
 const TEST_CMD = A.testCmd || 'python -m pytest -q'
 const LOG_PREFIX = A.logPrefix || 'run'
+const ENGINE_STATUS = A.engineStatus || {}
+const deadRun = id => ['quota', 'crash'].includes(String(ENGINE_STATUS[id] || 'ok').toLowerCase())
 
 const REVIEW_SCHEMA = {
   type: 'object',
@@ -67,8 +71,16 @@ Do not fix anything yourself.`
 const refutePrompt = (id, f) => `Verify a review finding for work package ${id} in ${ROOT}. A reviewer reported this failure: ${JSON.stringify(f)}.
 Read ${join(PROMPTS, id + '.md')} for the acceptance criterion's exact wording, read the cited files, and run the relevant tests (cd ${POSIX} && ${TEST_CMD} <path> 2>&1 | tail -15). Decide whether the finding is REAL (the code truly violates the criterion as written) or REFUTED (the reviewer misread the criterion, the code, or the test output). Default to refuted only when you can show concrete evidence that the criterion is satisfied.`
 
+// reviewing an engine run that did no work only burns a fix round: report it blocked instead
+const blocked = ids.filter(deadRun).map(id => {
+  log(`${id}: engine status ${ENGINE_STATUS[id]}: no engine work on disk, not reviewed; re-run the package on another engine (same round)`)
+  return { wp: id, verdict: 'blocked', blocked_reason: `engine ${String(ENGINE_STATUS[id]).toLowerCase()}`, pytest_summary: '', test_count: 0,
+    confirmed_failures: [], refuted_findings: [], low_findings: [], ownership_violations: [], mutation_check: '', passed_count: 0 }
+})
+const live = ids.filter(id => !deadRun(id))
+
 phase('Review')
-const results = await pipeline(ids,
+const results = !live.length ? [] : await pipeline(live,
   id => agent(reviewPrompt(id), { label: `review:${id}`, phase: 'Review', schema: REVIEW_SCHEMA, effort: 'high' }),
   async (rev, id) => {
     if (!rev) return { wp: id, verdict: 'fix', confirmed_failures: [{ criterion: 'reviewer crashed', severity: 'high', evidence: 'no review result', fix: 're-run review' }], refuted_findings: [], low_findings: [], pytest_summary: '', test_count: 0, ownership_violations: [], mutation_check: '', passed_count: 0 }
@@ -88,4 +100,4 @@ const results = await pipeline(ids,
       confirmed_failures: confirmed, refuted_findings: refuted, low_findings: low,
       ownership_violations: rev.ownership_violations, mutation_check: rev.mutation_check, passed_count: rev.passed_criteria.length }
   })
-return results.filter(Boolean)
+return blocked.concat(results.filter(Boolean))

@@ -39,7 +39,7 @@ cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 - agy needs `--dangerously-skip-permissions` in headless mode (runner adds it); Claude thinking models reject `--effort` (runner omits it for `claude*` models).
 - codex command shape is fixed in `jbr/runner.py::build_command`; `-o` captures the final message.
 - Prompts are handed over as a file pointer (Windows 32K command-line cap).
-- Quota exhausted: no output, or exit 124 from `--print-timeout`. Re-route with `--available <engine>=no`.
+- Quota exhausted: no output, or exit 124 from `--print-timeout`, or instant exit 3 with `RESOURCE_EXHAUSTED`/429. The `.done` marker says `QUOTA <reset-hint>` (`jbr wait`/`status` print it). `build_dag.js` then re-runs that step on `fallbackEngine` (default `claude_subagent`) without reviewing the dead run or spending a fix round; packages where every engine is dead end `blocked`. Manual flow: pass `engineStatus` to `review_level.js` so dead runs are not reviewed. Re-route later steps with `--available <engine>=no`.
 
 ## Do not
 

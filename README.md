@@ -86,7 +86,7 @@ Output `ops/routing.json`: `{"model": "jev-1.13.0", "state": {...}, "routing": {
 
 ## Run artifacts (`ops/reports/`)
 
-`run-<WP>[-tag].prompt.md` (self-contained prompt), `.log` (engine transcript), `.done` (`"<exit> <minutes>min"`; `-1` when `jbr run` itself crashed, traceback appended to `.log`), `.stdout` (detached wrapper), `.last.md` (codex final message). `spawn` exits 2 before launching anything when the engine key is not in `engines.json`. `compose-fix` writes `review-<WP>-round<N>.json` and `fix-<WP>-round<N>.md`.
+`run-<WP>[-tag].prompt.md` (self-contained prompt), `.log` (engine transcript), `.done` (`"<exit> <minutes>min <STATUS> [reset-hint]"`, STATUS = `OK` | `QUOTA` | `CRASH`, e.g. `3 0.0min QUOTA 2h9m31s`; `-1 <minutes>min` without a status token when `jbr run` itself crashed, traceback appended to `.log`; `wait`/`status` print the status, `runner.engine_status()` reads old and new markers), `.stdout` (detached wrapper), `.last.md` (codex final message). `spawn` exits 2 before launching anything when the engine key is not in `engines.json`. `compose-fix` writes `review-<WP>-round<N>.json` and `fix-<WP>-round<N>.md`.
 
 ## Calling the workflows from Claude Code
 
@@ -103,6 +103,7 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
   done: ["WP01", "WP02", "WP03"],
   routing: { WP04: "claude_subagent", WP05: "agy_gemini_pro" },   // ops/routing.json .routing[wp].engine
   engineArgs: { agy_gemini_pro: "--timeout 55m" },   // optional extra `jbr spawn` args per engine
+  fallbackEngine: "claude_subagent",     // optional; takes over a step whose engine reported quota/crash
   maxFixRounds: 2,
   testCmd: "python -m pytest -q",
   promptsDir: "ops/prompts", reportsDir: "ops/reports",
@@ -111,15 +112,16 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
 }
 ```
 
-Each package starts when its deps finish. `claude_subagent` packages get an implementer agent (effort high); external engines get a low-effort runner agent that executes `python -m jbr spawn`, polls the `.done` marker, and reports. Every package then goes through review -> refute -> fix (up to `maxFixRounds`). Returns one row per package: `{wp, engine, final, rounds, history, unresolved, low_open, mutation, ownership}`.
+Each package starts when its deps finish. `claude_subagent` packages get an implementer agent (effort high); external engines get a low-effort runner agent that executes `python -m jbr spawn`, polls the `.done` marker, and reports. Every package then goes through review -> refute -> fix (up to `maxFixRounds`). The runner reports `engine_status` (`ok|quota|crash`, from the `.done` marker); a `quota`/`crash` step is retried on `fallbackEngine` (default `claude_subagent`) without review and without consuming a fix round, and an engine that reported quota is skipped for the rest of the run. If the fallback is dead too the package ends `final: "blocked"` (no review of the dead run; `blocked: {stage, tried}`). Returns one row per package: `{wp, engine, final, rounds, history, unresolved, low_open, mutation, ownership[, blocked]}`; `history` stages carry `engines: [{engine, status, reset_hint}]`.
 
 **`workflows/review_level.js`**
 
 ```js
-{ root: "C:\\path\\to\\project", ids: ["WP01", "WP02"], testCmd: "python -m pytest -q", logPrefix: "run" }
+{ root: "C:\\path\\to\\project", ids: ["WP01", "WP02"], testCmd: "python -m pytest -q", logPrefix: "run",
+  engineStatus: { WP02: "QUOTA" } }   // optional, from `jbr wait`/`status`: quota/crash packages are not reviewed
 ```
 
-Returns `[{wp, verdict, confirmed_failures, refuted_findings, low_findings, pytest_summary, test_count, ownership_violations, mutation_check, passed_count}]`; save it as json and feed to `python -m jbr compose-fix <file> <round>`.
+Returns `[{wp, verdict, confirmed_failures, refuted_findings, low_findings, pytest_summary, test_count, ownership_violations, mutation_check, passed_count}]`; save it as json and feed to `python -m jbr compose-fix <file> <round>`. Rows with `verdict: "blocked"` (engine did no work) get no fix file: re-run that package on another engine for the same round.
 
 The skill in `skill/SKILL.md` (installed as `/build-router`) walks Claude Code through: read `engines.json` -> `jbr route` -> Workflow `build_dag.js` with the routing -> `review_level.js` + `compose-fix` for out-of-band reviews.
 
@@ -130,6 +132,7 @@ The skill in `skill/SKILL.md` (installed as `/build-router`) walks Claude Code t
 - **codex command shape**: `codex exec -s workspace-write --skip-git-repo-check -m <model> -c model_reasoning_effort=<effort> -C <root> -o <last.md> <pointer>`. `workspace-write` keeps it inside the repo; codex can spawn its own subagents.
 - **Windows 32K command-line cap**: the full prompt is written to `run-<WP>.prompt.md` and the engine gets a one-line pointer telling it to read that file first.
 - **Quota exhausted** shows up as an empty transcript, a `.done` with exit 124 (agy `--print-timeout`), or codex refusing with a usage-limit message. Re-route with `--available <engine>=no`. Observed: Claude Opus via agy exhausts after ~2 packages and stalls ~90 min; codex limits reset at a fixed clock time.
+- **Quota burned fix rounds (2026-10-01, fixed).** agy on Gemini failed instantly with exit 3 and `error: Individual quota reached ... Resets in 2h9m31s` / `AGY_ERROR: {"status":"RESOURCE_EXHAUSTED","error_code":429,...}`. The runner only said "engine produced no test summary", `build_dag.js` reviewed the untouched code anyway and counted the dead run as a fix round, so every round was spent with no engine work and packages ended UNRESOLVED. Now `jbr run` classifies each run (`runner.classify_run`): `QUOTA` on `RESOURCE_EXHAUSTED` / 429 / `quota reached|exceeded` / `usage limit`, on exit 124 with an empty transcript, or on an exit within 1 min with < 1000 chars of transcript; `CRASH` on a jbr crash or a non-zero exit with no output; else `OK`. `build_dag.js` falls back (see above) instead of reviewing; for manual flows pass `engineStatus` to `review_level.js`. The fast-exit rule also catches a missing binary (`agy: command not found`) as QUOTA; the fallback is the right response either way, but read the log before re-routing for hours.
 - **Gemini via agy** is fast (~6 min/package) but spec-literal misses are common (missing validators, stubbed functions, weakened tests): budget one fix round. Its different model family means Claude reviewers actually catch its errors instead of sharing blind spots.
 - **Reviewers and implementers share a checkout**: the workflow prompts forbid `git checkout/stash/reset` and tell reviewers to restore mutations by reverse edit (untracked files make `git checkout --` unsafe).
 - `spawn` sets `PYTHONPATH` to this repo for the child; the parent still needs `PYTHONPATH="$JBR"` (or `pip install -e .`) to import `jbr`.
