@@ -34,5 +34,15 @@
     "parallel_limit": 2,
     "available": true,
     "priority": 3
+  },
+  "ollama_qwen": {
+    "description": "Local Qwen 3.8 27B (MLX) on Ollama, driven by the Codex CLI (--oss). Free, private, never quota-limited, but only where Ollama runs (the Mac) and slow: Codex sends ~140k tokens of context, so even a trivial package takes several minutes, and a 27B model is much weaker than the cloud engines on multi-file work. Off by default; use for small, well-specified packages or when every cloud engine is exhausted.",
+    "runner": "codex",
+    "local_provider": "ollama",
+    "model": "qwen3.8:27b-mlx",
+    "effort": "high",
+    "parallel_limit": 1,
+    "available": false,
+    "priority": 5
   }
 }

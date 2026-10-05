@@ -5,10 +5,15 @@ description: "Use when a project has work packages to build (ops/work_packages.j
 
 # /build-router
 
-Repo: `C:\Users\a8878\dev\jev-build-router` (POSIX `/c/Users/a8878/dev/jev-build-router`). Pure Python 3.12 stdlib; no install needed, run with `PYTHONPATH`.
+Repo, per machine (pure Python 3.12 stdlib; no install needed, run with `PYTHONPATH`):
+
+- Windows laptop: `C:\Users\a8878\dev\jev-build-router` (POSIX `/c/Users/a8878/dev/jev-build-router`)
+- Mac: `/Users/ad/code/jev-build-router` (use the same path for `jbr`, `root` and `scriptPath`; `python` must be 3.12, not Apple's `/usr/bin/python3` 3.9)
+
+The Windows paths below are examples; substitute the current machine's.
 
 ```
-JBR=/c/Users/a8878/dev/jev-build-router
+JBR=/c/Users/a8878/dev/jev-build-router   # Mac: /Users/ad/code/jev-build-router
 cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 ```
 
@@ -20,6 +25,8 @@ agy is the base worker. Every implement/fix step prefers, in order:
 2. `agy_claude_opus` (agy, claude-opus-4-6-thinking; shares ONE Claude quota bucket with any other agy Claude model, e.g. Sonnet)
 3. `codex_astra` (codex, gpt-6-astra; flags `-s workspace-write`, there is no `--full-auto`)
 4. `claude_subagent` (Claude Code workflow subagent; last resort, never quota-probed)
+
+Opt-in local engine (Mac only, where Ollama runs): `ollama_qwen` (codex `--oss --local-provider ollama`, qwen3.8:27b-mlx). `available: false` in `engines.json`, so `route`/`pick` never choose it; use it explicitly with `spawn WP --engine ollama_qwen`, or let routing consider it with `--available ollama_qwen=yes`. Free and never quota-limited, but slow (codex sends ~140k tokens of context: several minutes even for a trivial package) and much weaker than the cloud engines; good for small well-specified packages or when every cloud engine is exhausted. Its probe asks Ollama directly (`ollama run --think=false <m> "Reply only READY."`), seconds, not codex.
 
 An engine out of quota is skipped until its reset time, then preferred again automatically. Availability is live, not configured: `engines.json` has `priority` 1..4 and every engine `available: true`; the shared state file `~/.jbr/engine_state.json` (override `JBR_STATE`) records `exhausted_until` per quota bucket.
 

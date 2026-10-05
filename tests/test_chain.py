@@ -91,6 +91,10 @@ def test_probe_commands_use_the_real_cli_flags(all_engines, monkeypatch):
                      "Reply only READY. Do not run tools."]
     assert "--full-auto" not in codex
     assert state.probe_command(all_engines["claude_subagent"]) is None
+    monkeypatch.setenv("JBR_OLLAMA_BIN", "ollama")
+    # local model: ask Ollama directly, codex's ~140k-token context would blow PROBE_TIMEOUT_S
+    assert state.probe_command(all_engines["ollama_qwen"]) == [
+        "ollama", "run", "--think=false", "qwen3.8:27b-mlx", "Reply only READY."]
     run_cmd = runner.build_command(all_engines["codex_astra"], REPO / "p.md", REPO, REPO / "l.md")
     assert "--full-auto" not in run_cmd and run_cmd[run_cmd.index("-s") + 1] == "workspace-write"
 
@@ -332,7 +336,9 @@ def test_route_passes_priority_and_live_status_and_writes_chains(project, packag
     assert st["engine_chain"] == [{"engine": "agy_gemini_pro", "priority": 1, "live_status": "EXHAUSTED"},
                                   {"engine": "agy_claude_opus", "priority": 2, "live_status": "AVAILABLE"},
                                   {"engine": "codex_astra", "priority": 3, "live_status": "AVAILABLE"},
-                                  {"engine": "claude_subagent", "priority": 4, "live_status": "AVAILABLE"}]
+                                  {"engine": "claude_subagent", "priority": 4, "live_status": "AVAILABLE"},
+                                  # opt-in local engine: listed for Jev's context, never offered as a criterion
+                                  {"engine": "ollama_qwen", "priority": 5, "live_status": "UNAVAILABLE"}]
     assert "live_status: EXHAUSTED until 2026-10-02T03:09:31Z" in st["engines"]["agy_gemini_pro"]
     assert "chain priority 1" in st["engines"]["agy_gemini_pro"]
     assert doc["routing"]["WP02"]["chain"] == ["agy_claude_opus", "codex_astra", "claude_subagent"]
