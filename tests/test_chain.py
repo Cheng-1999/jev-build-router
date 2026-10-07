@@ -91,6 +91,10 @@ def test_probe_commands_use_the_real_cli_flags(all_engines, monkeypatch):
                      "Reply only READY. Do not run tools."]
     assert "--full-auto" not in codex
     assert state.probe_command(all_engines["claude_subagent"]) is None
+    monkeypatch.setenv("JBR_OLLAMA_BIN", "ollama")
+    # local model: ask Ollama directly, codex's ~140k-token context would blow PROBE_TIMEOUT_S
+    assert state.probe_command(all_engines["ollama_qwen"]) == [
+        "ollama", "run", "--think=false", "qwen3.8:27b-mlx", "Reply only READY."]
     run_cmd = runner.build_command(all_engines["codex_astra"], REPO / "p.md", REPO, REPO / "l.md")
     assert "--full-auto" not in run_cmd and run_cmd[run_cmd.index("-s") + 1] == "workspace-write"
 
@@ -191,7 +195,7 @@ def test_cli_probe_exit_codes_and_no_engine_call_while_exhausted(all_engines, mo
 
 
 def test_pick_walks_priority_and_falls_through(all_engines):
-    fake = FakeRun({"gemini-3.1-pro-high": (3, AGY_QUOTA_LOG), "claude-opus-4-6-thinking": (3, "RESOURCE_EXHAUSTED (code 429)"),
+    fake = FakeRun({"gemini-3.1-pro-high": (3, AGY_QUOTA_LOG), "claude-opus-5-5-high": (3, "RESOURCE_EXHAUSTED (code 429)"),
                     "gpt-6-astra": (0, "READY")})
     key, seen = state.pick(all_engines, now=NOW, run=fake)
     assert key == "codex_astra"
@@ -207,7 +211,7 @@ def test_pick_walks_priority_and_falls_through(all_engines):
 
 
 def test_pick_prefers_gemini_and_honours_exclude(all_engines):
-    fake = FakeRun({"gemini-3.1-pro-high": (0, "READY"), "claude-opus-4-6-thinking": (0, "READY"), "gpt-6-astra": (0, "READY")})
+    fake = FakeRun({"gemini-3.1-pro-high": (0, "READY"), "claude-opus-5-5-high": (0, "READY"), "gpt-6-astra": (0, "READY")})
     assert state.pick(all_engines, now=NOW, run=fake)[0] == "agy_gemini_pro"
     assert state.pick(all_engines, {"agy_gemini_pro"}, now=NOW, run=fake)[0] == "agy_claude_opus"
     assert state.pick(all_engines, {"agy_gemini_pro", "agy_claude_opus", "codex_astra"}, now=NOW, run=fake)[0] == "claude_subagent"
@@ -332,7 +336,9 @@ def test_route_passes_priority_and_live_status_and_writes_chains(project, packag
     assert st["engine_chain"] == [{"engine": "agy_gemini_pro", "priority": 1, "live_status": "EXHAUSTED"},
                                   {"engine": "agy_claude_opus", "priority": 2, "live_status": "AVAILABLE"},
                                   {"engine": "codex_astra", "priority": 3, "live_status": "AVAILABLE"},
-                                  {"engine": "claude_subagent", "priority": 4, "live_status": "AVAILABLE"}]
+                                  {"engine": "claude_subagent", "priority": 4, "live_status": "AVAILABLE"},
+                                  # opt-in local engine: listed for Jev's context, never offered as a criterion
+                                  {"engine": "ollama_qwen", "priority": 5, "live_status": "UNAVAILABLE"}]
     assert "live_status: EXHAUSTED until 2026-10-02T03:09:31Z" in st["engines"]["agy_gemini_pro"]
     assert "chain priority 1" in st["engines"]["agy_gemini_pro"]
     assert doc["routing"]["WP02"]["chain"] == ["agy_claude_opus", "codex_astra", "claude_subagent"]
@@ -370,7 +376,7 @@ def test_route_all_external_out_goes_to_claude_without_api(project, packages, al
 
 def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, capsys):
     """End to end through the CLI: live probes (mocked subprocess) feed Jev (mocked urlopen)."""
-    replies = {"gemini-3.1-pro-high": (3, AGY_QUOTA_LOG), "claude-opus-4-6-thinking": (0, "READY"),
+    replies = {"gemini-3.1-pro-high": (3, AGY_QUOTA_LOG), "claude-opus-5-5-high": (0, "READY"),
                "gpt-6-astra": (0, "READY")}
     probed = []
 
@@ -386,7 +392,7 @@ def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, ca
     monkeypatch.setenv("TYPESAFE_API_KEY", "k-test")
     assert cli.main(["--project", str(project), "route"]) == 0
     out, err = capsys.readouterr()
-    assert sorted(probed) == ["claude-opus-4-6-thinking", "gemini-3.1-pro-high", "gpt-6-astra"]
+    assert sorted(probed) == ["claude-opus-5-5-high", "gemini-3.1-pro-high", "gpt-6-astra"]
     assert "agy_gemini_pro: EXHAUSTED" in err
     assert "agy_gemini_pro" not in next(iter(captured["body"]["questions"].values()))["criteria"]
     assert router.load_chains(project) == {wp: ["agy_claude_opus", "codex_astra", "claude_subagent"] for wp in ("WP01", "WP02", "WP03")}

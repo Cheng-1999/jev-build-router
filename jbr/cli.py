@@ -128,7 +128,7 @@ def cmd_route(a) -> int:
                        model=a.model, write=not a.no_write, availability=avail)
     if doc.get("dry_run"):
         req = doc["request"]
-        print(f"[dry-run] would POST to {router.TYPESAFE_URL} model={req['model']}")
+        print(f"[dry-run] would POST to {router.decision_url()} model={req['model']}")
         print(f"[dry-run] criteria (available engines): {list(router.usable_engines(engines, avail))}")
         print(json.dumps(req["questions"], indent=2))
         return 0

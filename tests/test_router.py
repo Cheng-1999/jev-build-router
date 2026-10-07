@@ -116,3 +116,67 @@ def test_build_request_no_available_engine_raises(packages, engines):
         e["available"] = False
     with pytest.raises(ValueError, match="no engine"):
         router.build_request(packages, engines)
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, *a):
+        return json.dumps(self.payload).encode()
+
+
+def test_decision_url_env_and_cloudflare_envelope(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req, timeout=0):
+        seen["url"], seen["auth"] = req.full_url, req.headers.get("Authorization")
+        return _FakeResp({"result": {"model": "clef", "answers": {"q": {"type": "noul", "noul": 0.9}}},
+                          "success": True, "errors": [], "messages": []})
+
+    monkeypatch.setattr(router.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("JBR_DECISION_URL", "https://api.cloudflare.com/client/v4/accounts/x/ai/run/@cf/cloudflare/clef")
+    out = router._post({"q": 1}, "k")
+    assert seen["url"].startswith("https://api.cloudflare.com/") and seen["auth"] == "Bearer k"
+    assert out["answers"]["q"]["noul"] == 0.9  # unwrapped from `result`
+    monkeypatch.delenv("JBR_DECISION_URL")
+    assert router.decision_url() == router.TYPESAFE_URL
+
+
+def test_local_decision_server_needs_no_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("JBR_DECISION_URL", "http://127.0.0.1:8000/v1/systemone")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "")
+    assert router.is_local(router.decision_url()) and not router.is_local(router.TYPESAFE_URL)
+    seen = {}
+
+    def post(body, key):
+        seen["key"] = key
+        return {"model": "clef-4bit", "answers": {q: {"type": "choice", "choice": "a", "confidence": 0.9,
+                                                      "probabilities": {"a": 0.9, "b": 0.1}}
+                                                  for q in body["questions"]}}
+
+    engines = {"a": {"runner": "codex", "priority": 1}, "b": {"runner": "agy", "priority": 2},
+               "claude_subagent": {"runner": "claude_subagent", "priority": 3}}
+    pk = [{"id": "WP01", "title": "t", "depends_on": []}]
+    doc = router.route(tmp_path, pk, engines, post=post, write=False)
+    assert seen["key"] == "local" and doc["routing"]["WP01"]["engine"] == "a"
+
+
+def test_decision_token_is_bound_to_destination(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "jev-secret")
+    monkeypatch.setenv("CLOUDFLARE_AI_TOKEN", "cf-secret")
+    assert router.decision_token(router.TYPESAFE_URL) == "jev-secret"
+    assert router.decision_token("http://127.0.0.1:8000/v1/systemone") == "local"
+    assert router.decision_token("https://api.cloudflare.com/client/v4/accounts/x/ai/run/@cf/cloudflare/clef") == "cf-secret"
+    assert router.decision_token("https://api.cloudflare.com/client/v4/accounts/x/secrets") == ""
+    assert not router.is_local("http://localhost.evil.example/v1/systemone")
+    assert not router.is_local("http://127.0.0.1.evil.example/v1/systemone")
+    assert router.decision_token("https://example.com/v1/systemone") == ""
+    with pytest.raises(ValueError, match="loopback HTTP or HTTPS"):
+        router.decision_token("http://example.com/v1/systemone")

@@ -147,9 +147,13 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
         return None
     if runner == "codex":
         # OpenAI Codex CLI. workspace-write sandbox keeps it inside the repo.
-        return ["codex", "exec", "-s", "workspace-write", "--skip-git-repo-check", "-m", model,
-                "-c", f"model_reasoning_effort={effort}", "-C", str(project_root),
-                "-o", str(last_file), pointer]
+        cmd = ["codex", "exec", "-s", "workspace-write", "--skip-git-repo-check", "-m", model,
+               "-c", f"model_reasoning_effort={effort}", "-C", str(project_root),
+               "-o", str(last_file), pointer]
+        if engine.get("local_provider"):
+            # local model (ollama | lmstudio) through codex's own OSS provider: same sandbox, no quota
+            cmd[2:2] = ["--oss", "--local-provider", engine["local_provider"]]
+        return cmd
     if runner == "agy":
         cmd = ["agy", "-p", pointer, "--model", model, "--dangerously-skip-permissions", "--print-timeout", timeout]
         if not model.startswith("claude"):

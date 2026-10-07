@@ -22,9 +22,14 @@ import json
 import os
 import pathlib
 import urllib.request
+import urllib.parse
 from typing import Any, Callable
 
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+# Any System One-compatible endpoint: a local Clef server (clef_mlx.py serve -> http://127.0.0.1:8000/v1/systemone,
+# no key needed) or Cloudflare Workers AI (.../ai/run/@cf/cloudflare/clef, answers wrapped in `result`).
+DECISION_URL_ENV = "JBR_DECISION_URL"
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_MODEL = "jev-latest"
 ROUTING_FILE = pathlib.Path("ops") / "routing.json"
 
@@ -203,12 +208,42 @@ def build_request(packages: list[dict], engines: dict[str, dict], extra_state: d
     return {"state": state, "model": model, "questions": questions}
 
 
+def decision_url() -> str:
+    return os.environ.get(DECISION_URL_ENV) or TYPESAFE_URL
+
+
+def is_local(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(url)
+    return (parsed.scheme == "http" and parsed.hostname in _LOCAL_HOSTS
+            and parsed.username is None and parsed.password is None)
+
+
+def decision_token(url: str) -> str:
+    """Select credentials for the destination; never forward a Jev key to an override URL."""
+    if is_local(url):
+        return "local"
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        raise ValueError("JBR_DECISION_URL must be loopback HTTP or HTTPS without URL credentials")
+    if url == TYPESAFE_URL:
+        return os.environ.get("TYPESAFE_API_KEY", "")
+    if (parsed.hostname == "api.cloudflare.com"
+            and parsed.path.startswith("/client/v4/accounts/")
+            and "/ai/run/@cf/cloudflare/" in parsed.path):
+        return os.environ.get("CLOUDFLARE_AI_TOKEN", "")
+    return os.environ.get("JBR_DECISION_TOKEN", "")
+
+
 def _post(body: dict, api_key: str, timeout: int = 90) -> dict:
     req = urllib.request.Request(
-        TYPESAFE_URL, data=json.dumps(body).encode("utf-8"),
+        decision_url(), data=json.dumps(body).encode("utf-8"),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+        out = json.load(r)
+    # Cloudflare's REST envelope: {"result": {...answers...}, "success": true, ...}
+    if "answers" not in out and isinstance(out.get("result"), dict):
+        out = out["result"]
+    return out
 
 
 def route(project_root: str | os.PathLike, packages: list[dict], engines: dict[str, dict],
@@ -234,9 +269,9 @@ def route(project_root: str | os.PathLike, packages: list[dict], engines: dict[s
             routing[wp] = {"engine": only, "confidence": 1.0, "probabilities": {only: 1.0}}
         model_used = "none (single available engine)"
     else:
-        key = api_key or os.environ.get("TYPESAFE_API_KEY")
+        key = api_key or decision_token(decision_url())
         if not key:
-            raise RuntimeError("TYPESAFE_API_KEY not set (or pass api_key=)")
+            raise RuntimeError("decision endpoint token not set (TYPESAFE_API_KEY, CLOUDFLARE_AI_TOKEN, or JBR_DECISION_TOKEN)")
         out = (post or _post)(body, key)
         for wp in body["state"]["packages"]:
             ans = out["answers"][f"engine_{wp}"]
