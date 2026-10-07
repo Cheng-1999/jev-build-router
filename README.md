@@ -22,7 +22,7 @@ jev-build-router/
 ## Quick start
 
 ```bash
-JBR=/c/Users/a8878/dev/jev-build-router          # POSIX path of this checkout
+JBR=/c/Users/a8878/dev/jev-build-router          # Mac: /Users/ad/code/jev-build-router
 cd /path/to/project                              # has ops/work_packages.json + ops/prompts/WPxx.md
 export TYPESAFE_API_KEY=...                      # only needed for a real `route`
 
@@ -38,6 +38,14 @@ PYTHONPATH="$JBR" python -m jbr compose-fix review_output.json 1   # -> ops/repo
 PYTHONPATH="$JBR" python -m jbr spawn WP05 --tag fix1 --extra-file ops/reports/fix-WP05-round1.md
 ```
 
+To route with a local Clef server, set `JBR_DECISION_URL=http://127.0.0.1:8000/v1/systemone`
+and pass `route --model clef-flash-4bit`; no API token is needed, even when
+`TYPESAFE_API_KEY` is present in the shell. For hosted Clef, point
+`JBR_DECISION_URL` at the Workers AI `@cf/cloudflare/clef` or `clef-flash`
+endpoint, set `CLOUDFLARE_AI_TOKEN`, and pass the matching `--model`. An
+arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. A Jev key
+is sent only to the default Jev URL.
+
 ## Engine chain (default since 2026-10-02)
 
 agy is the base worker. Each implement/fix step prefers, in order (`priority` in `engines.json`):
@@ -45,7 +53,7 @@ agy is the base worker. Each implement/fix step prefers, in order (`priority` in
 | priority | engine | CLI |
 |---|---|---|
 | 1 | `agy_gemini_pro` | agy, gemini-3.1-pro-high |
-| 2 | `agy_claude_opus` | agy, claude-opus-4-6-thinking |
+| 2 | `agy_claude_opus` | agy, claude-opus-5-5-high |
 | 3 | `codex_astra` | codex, gpt-6-astra (`-s workspace-write`) |
 | 4 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
 

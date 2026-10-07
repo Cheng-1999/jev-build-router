@@ -39,7 +39,7 @@ def test_build_command_agy_claude_omits_effort(tmp_path, engines):
     assert cmd[:2] == ["agy", "-p"]
     assert str(tmp_path / "p.md") in cmd[2]  # file pointer, not the prompt body
     assert "--dangerously-skip-permissions" in cmd
-    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-6-thinking"
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5-high"
     assert cmd[cmd.index("--print-timeout") + 1] == "40m"
     assert "--effort" not in cmd
 

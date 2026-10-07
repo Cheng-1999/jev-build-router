@@ -9,9 +9,9 @@
     "priority": 4
   },
   "agy_claude_opus": {
-    "description": "agy CLI on claude-opus-4-6-thinking. Observed: ~11 min per package, ~2 confirmed defects, but quota exhausts after ~2 runs and stalls ~90 minutes. Same family as the Claude reviewers. Shares one Claude quota bucket with every other agy Claude engine (state file key agy_claude).",
+    "description": "agy CLI on claude-opus-5-5-high (was claude-opus-4-6-thinking until agy retired it, 2026-10-06; effort is in the model name). Observed: ~11 min per package, ~2 confirmed defects, but quota exhausts after ~2 runs and stalls ~90 minutes. Same family as the Claude reviewers. Shares one Claude quota bucket with every other agy Claude engine (state file key agy_claude).",
     "runner": "agy",
-    "model": "claude-opus-4-6-thinking",
+    "model": "claude-opus-5-5-high",
     "effort": "high",
     "parallel_limit": 2,
     "available": true,
