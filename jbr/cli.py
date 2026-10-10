@@ -79,6 +79,23 @@ def _parser() -> argparse.ArgumentParser:
     pr.add_argument("engine")
     pr.add_argument("--no-live", action="store_true", help="state file only; never call the engine (UNKNOWN -> exit 0)")
 
+    asg = sub.add_parser("assign", help="the commander's routing: WP=engine pairs -> ops/routing.json (live-checked chains)")
+    asg.add_argument("pairs", nargs="+", metavar="WP=ENGINE", help="e.g. WP01=agy_gemini_pro WP03=codex_astra")
+    asg.add_argument("--reason", action="append", default=[], metavar="WP=TEXT", help="one-line rationale per package (repeatable)")
+    asg.add_argument("--no-probe", action="store_true", help="state file only for availability (no live probes)")
+    asg.add_argument("--second-opinion", action="store_true",
+                     help="also ask the decision model (JBR_DECISION_URL, e.g. local Clef) and record its pick beside yours; never applied")
+    asg.add_argument("--model", default=router.DEFAULT_MODEL, help="decision model name for --second-opinion")
+    asg.add_argument("--no-write", action="store_true")
+
+    rec = sub.add_parser("record", help="append a build_dag.js result (JSON list) to the engine ledger")
+    rec.add_argument("result_json", help="file with the Workflow's returned list [{wp, engine, final, history, ...}]")
+    rec.add_argument("--build", default="", help="build name for the ledger (e.g. clef-backend)")
+
+    sc = sub.add_parser("scorecard", help="per-engine track record from the ledger (what the commander assigns from)")
+    sc.add_argument("--json", action="store_true")
+    sc.add_argument("--project-only", action="store_true", help="only this project's entries")
+
     pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
     pk.add_argument("--exclude", default="", help="comma-separated engine keys to skip")
     pk.add_argument("--no-live", action="store_true", help="state file only; never call an engine")
@@ -128,7 +145,7 @@ def cmd_route(a) -> int:
                        model=a.model, write=not a.no_write, availability=avail)
     if doc.get("dry_run"):
         req = doc["request"]
-        print(f"[dry-run] would POST to {router.TYPESAFE_URL} model={req['model']}")
+        print(f"[dry-run] would POST to {router.decision_url()} model={req['model']}")
         print(f"[dry-run] criteria (available engines): {list(router.usable_engines(engines, avail))}")
         print(json.dumps(req["questions"], indent=2))
         return 0
@@ -208,7 +225,7 @@ def cmd_pick(a) -> int:
 
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
 # sub-options that take one value: the token after them is a VALUE, never a global option
-VALUE_OPTS = {"--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
+VALUE_OPTS = {"--reason", "--build", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
               "--model", "--timeout-min", "--poll", "--exclude"}
 
 
@@ -217,7 +234,7 @@ def _hoist_globals(argv: list[str]) -> list[str]:
     if not argv:
         return argv
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
-                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick"}), None)
+                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
@@ -285,11 +302,83 @@ def cmd_status(a) -> int:
     return 0
 
 
+def _pairs(values: list[str], what: str) -> dict[str, str]:
+    out = {}
+    for v in values:
+        k, sep, val = v.partition("=")
+        if not sep or not k.strip() or not val.strip():
+            raise SystemExit(f"{what} expects WP=VALUE, got {v!r}")
+        out[k.strip()] = val.strip()
+    return out
+
+
+def cmd_assign(a) -> int:
+    project = pathlib.Path(a.project).resolve()
+    engines = _engines(a)
+    assignments = _pairs(a.pairs, "assign")
+    reasons = _pairs(a.reason, "--reason")
+    known = {w["id"] for w in runner.load_packages(project / a.packages)[0]} if (project / a.packages).exists() else set()
+    unknown = sorted(set(assignments) - known) if known else []
+    if unknown:
+        print(f"[jbr assign] not in {a.packages}: {unknown}", file=sys.stderr)
+        return 2
+    avail = state.availability(engines, live=not a.no_probe)
+    opinion = None
+    if a.second_opinion:
+        packages, meta = runner.load_packages(project / a.packages)
+        packages = [p for p in packages if p["id"] in assignments]
+        opinion = router.route(project, packages, engines, {"goal": meta["goal"]} if meta.get("goal") else {},
+                               model=a.model, write=False, availability=avail)
+    try:
+        doc = router.assign(project, assignments, engines, reasons, availability=avail,
+                            write=not a.no_write, second_opinion=opinion)
+    except ValueError as e:
+        print(f"[jbr assign] {e}", file=sys.stderr)
+        return 2
+    for wp, r in doc["routing"].items():
+        so = r.get("second_opinion")
+        flag = f"  [2nd opinion: {so['engine']} p={so['confidence']}{'' if so['engine'] == r['engine'] else '  <- disagrees'}]" if so else ""
+        print(f"{wp}: {r['engine']} chain: {' > '.join(r['chain'])}{flag}" + (f"\n      why: {r['reason']}" if r["reason"] else ""))
+    if not a.no_write:
+        print(f"wrote {project / router.ROUTING_FILE}")
+    return 0
+
+
+def cmd_record(a) -> int:
+    from jbr import ledger
+    project = pathlib.Path(a.project).resolve()
+    results = json.loads(pathlib.Path(a.result_json).read_text(encoding="utf-8"))
+    if isinstance(results, dict) and "results" in results:
+        results = results["results"]
+    hints = {}
+    if (project / a.packages).exists():
+        hints = {w["id"]: w.get("routing_hints") or {} for w in runner.load_packages(project / a.packages)[0]}
+    entries = ledger.entries_from_build(results, project=project, build=a.build, reports_dir=a.reports, hints=hints)
+    path = ledger.append(entries)
+    for e in entries:
+        print(f"{e['wp']}: {e['engine']} {e['final']} fix_rounds={e['fix_rounds']} defects={e['confirmed']} "
+              f"minutes={e['minutes']}")
+    print(f"appended {len(entries)} to {path}")
+    return 0
+
+
+def cmd_scorecard(a) -> int:
+    from jbr import ledger
+    entries = ledger.load()
+    if a.project_only:
+        name = pathlib.Path(a.project).resolve().name
+        entries = [e for e in entries if e.get("project") == name]
+    card = ledger.scorecard(entries)
+    print(json.dumps(card, indent=2) if a.json else ledger.format_scorecard(card))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = _hoist_globals(list(sys.argv[1:] if argv is None else argv))
     a = _parser().parse_args(argv)
     return {"route": cmd_route, "run": cmd_run, "spawn": cmd_spawn, "wait": cmd_wait,
-            "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick}[a.cmd](a)
+            "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick,
+            "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard}[a.cmd](a)
 
 
 if __name__ == "__main__":

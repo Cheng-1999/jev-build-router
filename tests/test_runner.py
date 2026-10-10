@@ -3,7 +3,9 @@ import pathlib
 
 import pytest
 
-from jbr import runner
+from jbr import router, runner
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 def test_load_packages_accepts_wrapped_and_bare(tmp_path):
@@ -37,7 +39,7 @@ def test_build_command_agy_claude_omits_effort(tmp_path, engines):
     assert cmd[:2] == ["agy", "-p"]
     assert str(tmp_path / "p.md") in cmd[2]  # file pointer, not the prompt body
     assert "--dangerously-skip-permissions" in cmd
-    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-6-thinking"
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5-high"
     assert cmd[cmd.index("--print-timeout") + 1] == "40m"
     assert "--effort" not in cmd
 
@@ -238,3 +240,21 @@ def test_compose_fix_writes_fix_file_only_for_fix_verdicts(project):
     assert "- tests/test_other.py" in fix and "NOT caught" in fix
     assert not (project / "ops" / "reports" / "fix-WP02-round1.md").exists()
     assert (project / "ops" / "reports" / "review-WP02-round1.json").exists()
+
+
+def test_build_command_codex_local_provider(tmp_path):
+    engine = {"runner": "codex", "model": "qwen3.8:27b-mlx", "effort": "high", "local_provider": "ollama"}
+    cmd = runner.build_command(engine, tmp_path / "p.md", tmp_path, tmp_path / "last.md")
+    assert cmd[:7] == ["codex", "exec", "--oss", "--local-provider", "ollama", "-s", "workspace-write"]
+    assert cmd[cmd.index("-m") + 1] == "qwen3.8:27b-mlx"
+    assert cmd[cmd.index("-o") + 1] == str(tmp_path / "last.md")
+    assert "Read that file in full" in cmd[-1]
+
+
+def test_shipped_ollama_engine_sits_before_claude_in_the_chain():
+    engines = router.load_engines(REPO / "engines.json")
+    assert engines["ollama_qwen"]["local_provider"] == "ollama"
+    assert "ollama_qwen" in router.available_engines(engines)   # on by default; its live probe decides
+    assert router.by_priority(engines)[-2:] == ["ollama_qwen", "claude_subagent"]
+    assert router.chain_for("codex_astra", engines) == ["codex_astra", "agy_gemini_pro", "agy_claude_opus",
+                                                         "ollama_qwen", "claude_subagent"]

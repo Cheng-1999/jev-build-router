@@ -22,9 +22,14 @@ import json
 import os
 import pathlib
 import urllib.request
+import urllib.parse
 from typing import Any, Callable
 
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+# Any System One-compatible endpoint: a local Clef server (clef_mlx.py serve -> http://127.0.0.1:8000/v1/systemone,
+# no key needed) or Cloudflare Workers AI (.../ai/run/@cf/cloudflare/clef, answers wrapped in `result`).
+DECISION_URL_ENV = "JBR_DECISION_URL"
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_MODEL = "jev-latest"
 ROUTING_FILE = pathlib.Path("ops") / "routing.json"
 
@@ -34,7 +39,7 @@ DEFAULT_GOAL = (
 )
 CHAIN_POLICY = (
     "Engine chain: engines are ranked by `priority` (1 = most preferred; the user's default order is agy Gemini, "
-    "agy Claude Opus, Codex, Claude subagent as last resort). Prefer the highest-priority engine that is available "
+    "agy Claude Opus, Codex, local Qwen, Claude subagent as last resort). Prefer the highest-priority engine that is available "
     "now, unless this package's routing hints (numerical difficulty, state consistency / sign-convention "
     "criticality, size) clearly favour another available engine. Never choose an engine whose live_status is "
     "EXHAUSTED or UNAVAILABLE: it is out of quota or broken right now and is not offered as an answer."
@@ -203,12 +208,77 @@ def build_request(packages: list[dict], engines: dict[str, dict], extra_state: d
     return {"state": state, "model": model, "questions": questions}
 
 
+def decision_url() -> str:
+    return os.environ.get(DECISION_URL_ENV) or TYPESAFE_URL
+
+
+def is_local(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(url)
+    return (parsed.scheme == "http" and parsed.hostname in _LOCAL_HOSTS
+            and parsed.username is None and parsed.password is None)
+
+
+def decision_token(url: str) -> str:
+    """Select credentials for the destination; never forward a Jev key to an override URL."""
+    if is_local(url):
+        return "local"
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        raise ValueError("JBR_DECISION_URL must be loopback HTTP or HTTPS without URL credentials")
+    if url == TYPESAFE_URL:
+        return os.environ.get("TYPESAFE_API_KEY", "")
+    if (parsed.hostname == "api.cloudflare.com"
+            and parsed.path.startswith("/client/v4/accounts/")
+            and "/ai/run/@cf/cloudflare/" in parsed.path):
+        return os.environ.get("CLOUDFLARE_AI_TOKEN", "")
+    return os.environ.get("JBR_DECISION_TOKEN", "")
+
+
 def _post(body: dict, api_key: str, timeout: int = 90) -> dict:
     req = urllib.request.Request(
-        TYPESAFE_URL, data=json.dumps(body).encode("utf-8"),
+        decision_url(), data=json.dumps(body).encode("utf-8"),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+        out = json.load(r)
+    # Cloudflare's REST envelope: {"result": {...answers...}, "success": true, ...}
+    if "answers" not in out and isinstance(out.get("result"), dict):
+        out = out["result"]
+    return out
+
+
+def assign(project_root: str | os.PathLike, assignments: dict[str, str], engines: dict[str, dict],
+           reasons: dict[str, str] | None = None, *, availability: dict[str, dict] | None = None,
+           write: bool = True, second_opinion: dict | None = None) -> dict[str, Any]:
+    """The commander's routing: `assignments` maps package -> engine, chosen by the main session from
+    the specs, the code and `jbr scorecard`. Same ops/routing.json shape as route(), so build_dag.js
+    and `run`/`spawn` read it unchanged. An engine that is unknown or not usable right now is refused
+    (the commander re-assigns; a silent substitution would hide the decision). `second_opinion` is an
+    optional route() document kept beside the decision for the record, never applied."""
+    reasons = reasons or {}
+    usable = usable_engines(engines, availability)
+    routing: dict[str, dict] = {}
+    for wp, eng in assignments.items():
+        if eng not in engines:
+            raise ValueError(f"{wp}: unknown engine {eng!r}; known: {sorted(engines)}")
+        if eng not in usable and eng != LAST_RESORT:
+            live = (availability or {}).get(eng, {})
+            raise ValueError(f"{wp}: engine {eng} is not usable now ({live.get('status', 'disabled')}"
+                             f"{' until ' + live['until'] if live.get('until') else ''}); assign another")
+        routing[wp] = {"engine": eng, "assigned_by": "commander", "reason": reasons.get(wp, ""),
+                       "chain": chain_for(eng, engines, availability)}
+        if second_opinion:
+            other = second_opinion.get("routing", {}).get(wp)
+            if other:
+                routing[wp]["second_opinion"] = {"engine": other["engine"], "confidence": other.get("confidence"),
+                                                 "model": second_opinion.get("model")}
+    doc = {"model": "commander", "routing": routing, "chains": {wp: r["chain"] for wp, r in routing.items()}}
+    if availability is not None:
+        doc["availability"] = availability
+    if write:
+        path = pathlib.Path(project_root) / ROUTING_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    return doc
 
 
 def route(project_root: str | os.PathLike, packages: list[dict], engines: dict[str, dict],
@@ -234,9 +304,9 @@ def route(project_root: str | os.PathLike, packages: list[dict], engines: dict[s
             routing[wp] = {"engine": only, "confidence": 1.0, "probabilities": {only: 1.0}}
         model_used = "none (single available engine)"
     else:
-        key = api_key or os.environ.get("TYPESAFE_API_KEY")
+        key = api_key or decision_token(decision_url())
         if not key:
-            raise RuntimeError("TYPESAFE_API_KEY not set (or pass api_key=)")
+            raise RuntimeError("decision endpoint token not set (TYPESAFE_API_KEY, CLOUDFLARE_AI_TOKEN, or JBR_DECISION_TOKEN)")
         out = (post or _post)(body, key)
         for wp in body["state"]["packages"]:
             ans = out["answers"][f"engine_{wp}"]

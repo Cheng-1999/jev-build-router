@@ -1,17 +1,17 @@
 {
   "claude_subagent": {
-    "description": "Claude Code workflow subagent (strongest Claude model in the session, effort high). Runs many packages in parallel inside workflows/build_dag.js, no quota problem observed. Reviewer agents are the same model family, so reviewer and implementer share blind spots. Last resort of the engine chain: never quota-probed, always available.",
+    "description": "Claude Code workflow subagent (strongest Claude model in the session, effort high). Runs many packages in parallel inside workflows/build_dag.js, no quota problem observed. Reviewer agents are the same model family, so reviewer and implementer share blind spots. Last resort of the engine chain (after local Qwen): never quota-probed, always available.",
     "runner": "claude_subagent",
     "model": "claude (session model)",
     "effort": "high",
     "parallel_limit": 8,
     "available": true,
-    "priority": 4
+    "priority": 5
   },
   "agy_claude_opus": {
-    "description": "agy CLI on claude-opus-4-6-thinking. Observed: ~11 min per package, ~2 confirmed defects, but quota exhausts after ~2 runs and stalls ~90 minutes. Same family as the Claude reviewers. Shares one Claude quota bucket with every other agy Claude engine (state file key agy_claude).",
+    "description": "agy CLI on claude-opus-5-5-high (was claude-opus-4-6-thinking until agy retired it, 2026-10-06; effort is in the model name). Observed: ~11 min per package, ~2 confirmed defects, but quota exhausts after ~2 runs and stalls ~90 minutes. Same family as the Claude reviewers. Shares one Claude quota bucket with every other agy Claude engine (state file key agy_claude).",
     "runner": "agy",
-    "model": "claude-opus-4-6-thinking",
+    "model": "claude-opus-5-5-high",
     "effort": "high",
     "parallel_limit": 2,
     "available": true,
@@ -34,5 +34,15 @@
     "parallel_limit": 2,
     "available": true,
     "priority": 3
+  },
+  "ollama_qwen": {
+    "description": "Local Qwen 3.8 27B (MLX) on Ollama, driven by the Codex CLI (--oss). Free, private, never quota-limited; only where Ollama runs (the Mac; elsewhere its probe fails and the chain skips it). Slow: codex sends ~140k tokens of context, so even a trivial package takes several minutes, and a 27B model is weaker than the cloud engines on multi-file work. In the chain after Codex and before the Claude subagent, so it takes work before Claude quota is spent; best for small, fully specified packages. Runners wait up to ~140 min for it.",
+    "runner": "codex",
+    "local_provider": "ollama",
+    "model": "qwen3.8:27b-mlx",
+    "effort": "high",
+    "parallel_limit": 1,
+    "available": true,
+    "priority": 4
   }
 }

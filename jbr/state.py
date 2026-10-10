@@ -317,6 +317,10 @@ def probe_command(engine: dict) -> list[str] | None:
         return None
     if r == "agy":
         return [_bin("agy"), "--model", model, "--print-timeout", "45s", "--print", PROBE_PROMPT]
+    if r == "codex" and engine.get("local_provider") == "ollama":
+        # codex itself sends ~140k tokens of context: minutes on a local model, past PROBE_TIMEOUT_S.
+        # Ask Ollama directly instead (seconds); it fails fast when the server or model is missing.
+        return [_bin("ollama"), "run", "--think=false", model, PROBE_PROMPT]
     if r == "codex":
         # NB: this codex build has no --full-auto (it exits immediately); -s workspace-write is the sandbox flag
         return [_bin("codex"), "exec", "--skip-git-repo-check", "-m", model, "-s", "workspace-write", CODEX_PROBE_PROMPT]

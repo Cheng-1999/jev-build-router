@@ -45,7 +45,8 @@ def engines():
     engine is `available: true` in engines.json and live probes decide; the routing tests written
     before that keep their two-engine fixture."""
     from jbr import router
-    return router.load_engines(REPO / "engines.json", {"agy_claude_opus": False, "codex_astra": False})
+    return router.load_engines(REPO / "engines.json", {"agy_claude_opus": False, "codex_astra": False,
+                                                         "ollama_qwen": False})
 
 
 @pytest.fixture

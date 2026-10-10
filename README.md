@@ -22,7 +22,7 @@ jev-build-router/
 ## Quick start
 
 ```bash
-JBR=/c/Users/a8878/dev/jev-build-router          # POSIX path of this checkout
+JBR=/c/Users/a8878/dev/jev-build-router          # Mac: /Users/ad/code/jev-build-router
 cd /path/to/project                              # has ops/work_packages.json + ops/prompts/WPxx.md
 export TYPESAFE_API_KEY=...                      # only needed for a real `route`
 
@@ -38,6 +38,14 @@ PYTHONPATH="$JBR" python -m jbr compose-fix review_output.json 1   # -> ops/repo
 PYTHONPATH="$JBR" python -m jbr spawn WP05 --tag fix1 --extra-file ops/reports/fix-WP05-round1.md
 ```
 
+To route with a local Clef server, set `JBR_DECISION_URL=http://127.0.0.1:8000/v1/systemone`
+and pass `route --model clef-flash-4bit`; no API token is needed, even when
+`TYPESAFE_API_KEY` is present in the shell. For hosted Clef, point
+`JBR_DECISION_URL` at the Workers AI `@cf/cloudflare/clef` or `clef-flash`
+endpoint, set `CLOUDFLARE_AI_TOKEN`, and pass the matching `--model`. An
+arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. A Jev key
+is sent only to the default Jev URL.
+
 ## Engine chain (default since 2026-10-02)
 
 agy is the base worker. Each implement/fix step prefers, in order (`priority` in `engines.json`):
@@ -45,9 +53,10 @@ agy is the base worker. Each implement/fix step prefers, in order (`priority` in
 | priority | engine | CLI |
 |---|---|---|
 | 1 | `agy_gemini_pro` | agy, gemini-3.1-pro-high |
-| 2 | `agy_claude_opus` | agy, claude-opus-4-6-thinking |
+| 2 | `agy_claude_opus` | agy, claude-opus-5-5-high |
 | 3 | `codex_astra` | codex, gpt-6-astra (`-s workspace-write`) |
-| 4 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
+| 4 | `ollama_qwen` | local Qwen 3.8 27B on Ollama via codex `--oss` (Mac only; free, slow; runners wait ~140 min) |
+| 5 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
 
 An engine that is out of quota is skipped; once its quota resets it is preferred again automatically. Availability is decided live, not by `available` flags:
 
@@ -67,6 +76,26 @@ PYTHONPATH="$JBR" python -m jbr pick --exclude agy_gemini_pro
 `pip install -e .` also works (adds a `jbr` console script) but is not required.
 
 Global options go before the subcommand: `--project <root>` (default cwd), `--packages ops/work_packages.json`, `--prompts ops/prompts`, `--reports ops/reports`, `--engines <path>` (default: this repo's `engines.json`), `--available <engine>=yes|no` (repeatable). They are also accepted after the subcommand (the spawned child relies on that).
+
+## Commander routing and the engine ledger (default since 2026-10-10)
+
+The main Claude Code session assigns packages; a decision model is an optional second opinion.
+
+```bash
+PYTHONPATH="$JBR" python -m jbr scorecard                      # per-engine track record (~/.jbr/ledger.jsonl)
+PYTHONPATH="$JBR" python -m jbr assign WP01=agy_gemini_pro WP02=codex_astra \
+    --reason "WP02=billing path; non-Claude family for review" [--second-opinion]
+PYTHONPATH="$JBR" python -m jbr record build_result.json --build my-build   # after build_dag.js returns
+```
+
+- `assign` probes live, refuses unknown or exhausted engines (no silent substitution), and writes the same
+  `ops/routing.json` shape as `route` (`model: "commander"`, per package `engine`, `reason`, `chain`), so
+  `build_dag.js`, `run` and `spawn` read it unchanged. `--second-opinion` also asks the model at
+  `JBR_DECISION_URL` (use a local Clef server, free) and stores its pick as `second_opinion`; it is never applied.
+- `record` takes the list `build_dag.js` returns and appends one line per package: the engine whose implement
+  run succeeded (not the first one tried), final verdict, fix rounds, confirmed defects, quota hits, and
+  minutes summed from the project's `run-<WP>*.done` markers. `scorecard` aggregates per engine.
+- `route` (a decision model routes every package) remains for comparison.
 
 ## engines.json
 
