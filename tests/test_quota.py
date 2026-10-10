@@ -6,6 +6,7 @@ import pathlib
 import pytest
 
 from jbr import cli, runner
+from tests.conftest import reports
 from tests.test_workflows import BUILD_DAG, NODE, REVIEW_LEVEL, run_workflow
 
 # verbatim shape of ops/reports/run-WP27.log from 2026-10-01 (agy, Gemini quota)
@@ -89,7 +90,7 @@ def test_run_engine_crash_without_output_writes_crash_marker(project, engines, m
 
 
 def test_wait_and_cli_report_quota_status(project, capsys):
-    rep = project / "ops" / "reports"
+    rep = reports(project)
     rep.mkdir(parents=True)
     (rep / "run-WP01.done").write_text("3 0.0min QUOTA 2h9m31s\n", encoding="utf-8")
     (rep / "run-WP02.done").write_text("0 6.0min OK\n", encoding="utf-8")
@@ -109,13 +110,13 @@ def test_compose_fix_writes_no_fix_file_for_blocked_rows(project):
                                 "confirmed_failures": [], "low_findings": []}]), encoding="utf-8")
     rows = runner.compose_fix(project, src, 1)
     assert rows == [{"wp": "WP02", "verdict": "blocked", "confirmed": 0, "low": 0, "fix_file": None}]
-    assert not (project / "ops" / "reports" / "fix-WP02-round1.md").exists()
+    assert not (reports(project) / "fix-WP02-round1.md").exists()
 
 
 # ----------------------------------------------------------------------------- workflows
 
 needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
-EXT = {"root": "C:\\p", "jbr": "/c/jbr", "routing": {"WP01": "agy_gemini_pro"},
+EXT = {"root": "C:\\p", "jbr": "/c/jbr", "reportsDir": "/c/Users/me/.jbr/runs/C-p/reports", "routing": {"WP01": "agy_gemini_pro"},
        "engineChain": ["agy_gemini_pro"]}  # pre-chain shape: routed engine, then fallbackEngine only
 FIX_REVIEW = {"wp": "WP01", "pytest_summary": "1 failed, 4 passed", "test_count": 5, "passed_criteria": [],
               "failures": [{"criterion": "sign()", "severity": "high", "evidence": "returns 0", "fix": "+1/-1"}],

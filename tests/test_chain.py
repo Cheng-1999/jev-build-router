@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from jbr import cli, router, runner, state
+from jbr import cli, paths, router, runner, state
 from tests.conftest import REPO
 from tests.test_quota import AGY_QUOTA_LOG, _fake_engine, run_stub
 from tests.test_workflows import BUILD_DAG, NODE, run_workflow
@@ -345,7 +345,7 @@ def test_route_passes_priority_and_live_status_and_writes_chains(project, packag
     assert "chain priority 1" in st["engines"]["agy_gemini_pro"]
     assert doc["routing"]["WP02"]["chain"] == ["agy_claude_opus", "codex_astra", "claude_subagent"]
     assert doc["routing"]["WP03"]["chain"] == ["codex_astra", "agy_claude_opus", "claude_subagent"]
-    on_disk = json.loads((project / "ops" / "routing.json").read_text(encoding="utf-8"))
+    on_disk = json.loads(paths.routing_path(project).read_text(encoding="utf-8"))
     assert on_disk["chains"] == {"WP02": ["agy_claude_opus", "codex_astra", "claude_subagent"],
                                  "WP03": ["codex_astra", "agy_claude_opus", "claude_subagent"]}
     assert router.load_chains(project)["WP03"][0] == "codex_astra"
@@ -402,7 +402,7 @@ def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, ca
     assert "agy_gemini_pro" not in next(iter(captured["body"]["questions"].values()))["criteria"]
     assert router.load_chains(project) == {wp: ["agy_claude_opus", "codex_astra", "ollama_qwen", "claude_subagent"]
                                            for wp in ("WP01", "WP02", "WP03")}
-    doc = json.loads((project / "ops" / "routing.json").read_text(encoding="utf-8"))
+    doc = json.loads(paths.routing_path(project).read_text(encoding="utf-8"))
     assert doc["availability"]["agy_gemini_pro"]["status"] == "EXHAUSTED"
     # dry-run never probes live
     probed.clear()
@@ -413,7 +413,7 @@ def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, ca
 # ----------------------------------------------------------------------------- build_dag.js chain
 
 
-JBR = {"root": "C:\\p", "jbr": "/c/jbr"}
+JBR = {"root": "C:\\p", "jbr": "/c/jbr", "reportsDir": "/c/Users/me/.jbr/runs/C-p/reports"}
 ONE = [{"id": "WP01", "depends_on": []}]
 
 
@@ -518,3 +518,23 @@ def test_build_dag_waits_longer_for_local_qwen():
     src = BUILD_DAG.read_text(encoding="utf-8")
     assert "const ENGINE_WAITS = Object.assign({ ollama_qwen: 16 }, A.engineWaits || {})" in src
     assert "up to ${ENGINE_WAITS[eng] || 8} times" in src and "No marker after ${ENGINE_WAITS[eng] || 8} waits" in src
+
+
+@needs_node
+def test_build_dag_requires_reports_dir_for_external_engines_and_passes_it_to_jbr():
+    rc, out = run_workflow(BUILD_DAG, {"root": "/p", "jbr": "/jbr", "packages": ONE})
+    assert rc != 0 and "args.reportsDir is required" in json.dumps(out)
+    rc, out = run_workflow(BUILD_DAG, {"root": "/p", "jbr": "/jbr", "packages": ONE,
+                                       "reportsDir": "/home/me/.jbr/runs/p/reports"})
+    assert rc == 0
+    prompt = next(v for k, v in out["prompts"].items() if k.startswith("impl:WP01:"))
+    assert '--reports "/home/me/.jbr/runs/p/reports"' in prompt            # probe + spawn write there...
+    assert "[ -f /home/me/.jbr/runs/p/reports/run-WP01.done ]" in prompt    # ...and the runner waits there
+    # Claude-only builds need no runs dir
+    rc, out = run_workflow(BUILD_DAG, {"root": "/p", "packages": ONE, "routing": {"WP01": "claude_subagent"}})
+    assert rc == 0
+
+
+def test_build_dag_absolute_dirs_are_not_joined_onto_the_root():
+    src = BUILD_DAG.read_text(encoding="utf-8")
+    assert "const specPath = id => under(PROMPTS," in src and "${under(extraFile)}" in src

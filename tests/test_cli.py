@@ -6,8 +6,8 @@ import sys
 
 import pytest
 
-from jbr import cli, router
-from tests.conftest import REPO
+from jbr import cli, paths, router
+from tests.conftest import REPO, reports
 
 
 def test_help_exits_zero(capsys):
@@ -34,21 +34,49 @@ def test_route_dry_run_prints_questions_without_api(project, capsys, monkeypatch
     assert "[dry-run] would POST" in out
     assert "'codex_astra'" in out and "'agy_claude_opus'" not in out
     assert "engine_WP02" in out and "engine_WP03" in out and "engine_WP01" not in out
-    assert not (project / "ops" / "routing.json").exists()
+    assert not paths.routing_path(project).exists()
 
 
 def test_run_dry_run_uses_routing_json_when_no_engine(project, capsys, monkeypatch):
     routing = {"model": "x", "state": {}, "routing": {"WP01": {"engine": "codex_astra", "confidence": 1, "probabilities": {}}}}
-    (project / "ops" / "routing.json").write_text(json.dumps(routing), encoding="utf-8")
+    paths.routing_path(project).parent.mkdir(parents=True, exist_ok=True)
+    paths.routing_path(project).write_text(json.dumps(routing), encoding="utf-8")
     rc = cli.main(["--project", str(project), "run", "WP01", "--dry-run"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "engine=codex_astra" in out and '"codex"' in out
-    assert (project / "ops" / "reports" / "run-WP01.prompt.md").stat().st_size > 0
+    assert (reports(project) / "run-WP01.prompt.md").stat().st_size > 0
+
+
+def test_jbr_never_writes_into_the_project(project, capsys, monkeypatch):
+    monkeypatch.setenv("JBR_RUNS", str(project.parent / (project.name + "-runs")))  # the fixture's runs dir is under tmp_path
+    before = {p for p in project.rglob("*")}
+    assert cli.main(["--project", str(project), "run", "WP01", "--engine", "codex_astra", "--dry-run"]) == 0
+    assert cli.main(["--project", str(project), "assign", "WP01=claude_subagent", "--no-probe"]) == 0
+    assert {p for p in project.rglob("*")} == before          # prompt + routing.json went to the runs dir
+    assert (reports(project) / "run-WP01.prompt.md").exists() and paths.routing_path(project).exists()
+    assert str(paths.runs_root()) in str(paths.routing_path(project))
+
+
+def test_legacy_in_project_routing_json_is_still_read(project):
+    legacy = project / "ops" / "routing.json"
+    legacy.write_text(json.dumps({"routing": {"WP01": {"engine": "codex_astra", "chain": ["codex_astra"]}}}))
+    assert router.load_routing(project) == {"WP01": "codex_astra"}
+    router.assign(project, {"WP01": "claude_subagent"}, router.load_engines(REPO / "engines.json"))
+    assert router.load_routing(project) == {"WP01": "claude_subagent"}   # the runs-dir copy wins
+    assert json.loads(legacy.read_text())["routing"]["WP01"]["engine"] == "codex_astra"  # legacy never rewritten
+
+
+def test_paths_command_prints_the_runs_dir(project, capsys):
+    assert cli.main(["--project", str(project), "paths"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["reports_dir"] == str(reports(project)) and out["routing"] == str(paths.routing_path(project))
+    key = paths.project_key(project)
+    assert "/" not in key and key.endswith(project.name)
 
 
 def test_run_without_routing_fails_clearly(project):
-    with pytest.raises(SystemExit, match="ops/routing.json"):
+    with pytest.raises(SystemExit, match="routing.json"):
         cli.main(["--project", str(project), "run", "WP01", "--dry-run"])
 
 
@@ -68,7 +96,7 @@ def test_spawn_unknown_engine_exits_2_before_launching(project, capsys, monkeypa
     assert rc == 2
     err = capsys.readouterr().err
     assert "unknown engine 'bogus_engine'" in err and "agy_gemini_pro" in err and "codex_astra" in err
-    assert not (project / "ops" / "reports").exists()
+    assert not (reports(project)).exists()
 
 
 def test_spawn_resolves_relative_engines_and_extra_file_to_absolute(project, capsys, monkeypatch):
@@ -108,7 +136,7 @@ def test_spawn_non_dry_launches_detached_child_with_pythonpath(project, capsys, 
         assert kw["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
         assert kw["start_new_session"] is True
-    assert (project / "ops" / "reports" / "run-WP01-t1.stdout").exists()
+    assert (reports(project) / "run-WP01-t1.stdout").exists()
     # the child's argv (globals after `run`) parses in the child exactly as spawn intended
     hoisted = cli._hoist_globals(argv[3:])
     a = cli._parser().parse_args(hoisted)
@@ -141,7 +169,7 @@ def test_available_after_subcommand_reaches_route(project, capsys, monkeypatch):
 
 
 def test_wait_returns_124_while_a_marker_is_missing(project, capsys):
-    rep = project / "ops" / "reports"
+    rep = reports(project)
     rep.mkdir(parents=True)
     (rep / "run-WP01.done").write_text("0 1.0min\n", encoding="utf-8")
     rc = cli.main(["--project", str(project), "wait", "WP01", "WP02", "--timeout-min", "0", "--poll", "0"])
@@ -158,7 +186,7 @@ def test_status_resolves_hyphenated_ids_against_packages(project, capsys):
     pk = json.loads((project / "ops" / "work_packages.json").read_text(encoding="utf-8"))
     pk["work_packages"].append({"id": "WP-X", "title": "hyphen", "goal": "", "depends_on": []})
     (project / "ops" / "work_packages.json").write_text(json.dumps(pk), encoding="utf-8")
-    rep = project / "ops" / "reports"
+    rep = reports(project)
     rep.mkdir(parents=True)
     (rep / "run-WP-X-fix1.prompt.md").write_text("p", encoding="utf-8")
     (rep / "run-WP-X-fix1.done").write_text("0 3.0min\n", encoding="utf-8")
@@ -167,12 +195,12 @@ def test_status_resolves_hyphenated_ids_against_packages(project, capsys):
 
 
 def test_status_and_compose_fix_via_cli(project, capsys):
-    (project / "ops" / "reports").mkdir(parents=True)
+    (reports(project)).mkdir(parents=True)
     src = project / "r.json"
     src.write_text(json.dumps([{"wp": "WP03", "verdict": "fix", "confirmed_failures": [
         {"criterion": "c", "severity": "medium", "evidence": "e", "fix": "f"}], "low_findings": []}]), encoding="utf-8")
     assert cli.main(["--project", str(project), "compose-fix", str(src), "2"]) == 0
     assert "WP03 fix 1 0" in capsys.readouterr().out
-    assert (project / "ops" / "reports" / "fix-WP03-round2.md").exists()
+    assert (reports(project) / "fix-WP03-round2.md").exists()
     assert cli.main(["--project", str(project), "status"]) == 0
     assert "no runs found" in capsys.readouterr().out

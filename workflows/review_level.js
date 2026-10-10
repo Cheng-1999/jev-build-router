@@ -7,7 +7,8 @@
 //   root: 'C:\\path\\to\\project',      // required
 //   posixRoot: '/c/path/to/project',    // default: derived from root
 //   ids: ['WP01', 'WP02'],              // required (args must be this object; a bare array has no root)
-//   promptsDir: 'ops/prompts', reportsDir: 'ops/reports',
+//   promptsDir: 'ops/prompts',          // absolute, or relative to root
+//   reportsDir: '<jbr paths .reports_dir>',  // where the engine transcripts are (optional: without it reviewers skip them)
 //   testCmd: 'python -m pytest -q',
 //   logPrefix: 'run',                   // engine transcript is <reportsDir>/<logPrefix>-<id>.log
 //   engineStatus: { WP02: 'quota' }     // optional, from `jbr wait`/`jbr status` (OK|QUOTA|CRASH): a package whose
@@ -32,8 +33,10 @@ const SEP = ROOT.includes('\\') ? '\\' : '/'
 const toPosix = p => p.replace(/^([A-Za-z]):[\\/]/, (m, d) => '/' + d.toLowerCase() + '/').replace(/\\/g, '/')
 const POSIX = A.posixRoot || toPosix(ROOT)
 const join = (...parts) => [ROOT, ...parts].join(SEP).replace(/[\\/]+/g, SEP)
+const isAbs = p => /^([A-Za-z]:)?[\\/]/.test(p)
+const under = (dir, ...rest) => isAbs(dir) ? [dir, ...rest].join('/').replace(/[\\/]+/g, '/') : join(dir, ...rest)
 const PROMPTS = A.promptsDir || 'ops/prompts'
-const REPORTS = A.reportsDir || 'ops/reports'
+const REPORTS = A.reportsDir || ''
 const TEST_CMD = A.testCmd || 'python -m pytest -q'
 const LOG_PREFIX = A.logPrefix || 'run'
 const ENGINE_STATUS = A.engineStatus || {}
@@ -59,8 +62,8 @@ const VERDICT_SCHEMA = { type: 'object', properties: {
   refuted: { type: 'boolean' }, reason: { type: 'string' } }, required: ['refuted', 'reason'] }
 
 const reviewPrompt = id => `Adversarial fresh-context review of work package ${id} in the repo ${ROOT}. You did not write this code; do not infer the author's intent, judge only what is on disk.
-1. Read ${join(PROMPTS, id + '.md')} fully: it holds the goal, owned files and the acceptance criteria.
-2. Read ${join(REPORTS, LOG_PREFIX + '-' + id + '.log')} if it exists (the engineer's transcript; treat its claims as unverified).
+1. Read ${under(PROMPTS, id + '.md')} fully: it holds the goal, owned files and the acceptance criteria.
+2. ${REPORTS ? `Read ${under(REPORTS, LOG_PREFIX + '-' + id + '.log')} if it exists (the engineer's transcript; treat its claims as unverified).` : 'No engine transcript was provided; judge the code and tests only.'}
 3. Run the tests from the repo root with Bash: cd ${POSIX} && ${TEST_CMD} 2>&1 | tail -20 . Record the summary line and total test count. If the package spec names specific test ids, run them explicitly too.
 4. Check EVERY acceptance criterion against the code and test output; cite file:line evidence for each pass and each failure. Verify field names, enum members, signatures and numeric tolerances literally as written in the criteria.
 5. Ownership: list any file the engineer modified that is not in the package's owned-file list (cd ${POSIX} && git status --short && git diff --stat) unless it is a pure export append.
@@ -69,7 +72,7 @@ const reviewPrompt = id => `Adversarial fresh-context review of work package ${i
 Do not fix anything yourself.`
 
 const refutePrompt = (id, f) => `Verify a review finding for work package ${id} in ${ROOT}. A reviewer reported this failure: ${JSON.stringify(f)}.
-Read ${join(PROMPTS, id + '.md')} for the acceptance criterion's exact wording, read the cited files, and run the relevant tests (cd ${POSIX} && ${TEST_CMD} <path> 2>&1 | tail -15). Decide whether the finding is REAL (the code truly violates the criterion as written) or REFUTED (the reviewer misread the criterion, the code, or the test output). Default to refuted only when you can show concrete evidence that the criterion is satisfied.`
+Read ${under(PROMPTS, id + '.md')} for the acceptance criterion's exact wording, read the cited files, and run the relevant tests (cd ${POSIX} && ${TEST_CMD} <path> 2>&1 | tail -15). Decide whether the finding is REAL (the code truly violates the criterion as written) or REFUTED (the reviewer misread the criterion, the code, or the test output). Default to refuted only when you can show concrete evidence that the criterion is satisfied.`
 
 // reviewing an engine run that did no work only burns a fix round: report it blocked instead
 const blocked = ids.filter(deadRun).map(id => {

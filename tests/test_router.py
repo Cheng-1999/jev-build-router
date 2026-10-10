@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from jbr import router
+from jbr import paths, router
 
 
 def test_compute_depths_from_depends_on(packages):
@@ -60,7 +60,7 @@ def test_route_dry_run_does_not_call_api(project, packages, engines, monkeypatch
     doc = router.route(project, packages, engines, dry_run=True)
     assert doc["dry_run"] is True
     assert "engine_WP03" in doc["request"]["questions"]
-    assert not (project / "ops" / "routing.json").exists()
+    assert not paths.routing_path(project).exists()
 
 
 def test_route_with_mocked_urlopen_writes_routing_json(project, packages, engines, monkeypatch):
@@ -90,7 +90,7 @@ def test_route_with_mocked_urlopen_writes_routing_json(project, packages, engine
     assert set(captured["body"]["questions"]) == {"engine_WP02", "engine_WP03"}
     assert doc["model"] == "jev-1.13.0"
     assert doc["routing"]["WP02"]["engine"] == "agy_gemini_pro"
-    on_disk = json.loads((project / "ops" / "routing.json").read_text(encoding="utf-8"))
+    on_disk = json.loads(paths.routing_path(project).read_text(encoding="utf-8"))
     assert on_disk["routing"]["WP03"]["confidence"] == 0.7
     assert router.load_routing(project) == {"WP02": "agy_gemini_pro", "WP03": "agy_gemini_pro"}
     assert "WP02: agy_gemini_pro (p=0.50, conf=0.70)" in router.format_routing(doc)
@@ -103,7 +103,7 @@ def test_route_single_available_engine_skips_api(project, packages, engines, mon
                                "ollama_qwen": False})
     doc = router.route(project, packages, eng, write=False)
     assert all(r["engine"] == "claude_subagent" for r in doc["routing"].values())
-    assert not (project / "ops" / "routing.json").exists()
+    assert not paths.routing_path(project).exists()
 
 
 def test_route_requires_key_when_api_needed(project, packages, engines, monkeypatch):

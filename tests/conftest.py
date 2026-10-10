@@ -36,7 +36,16 @@ def isolated_engine_state(tmp_path, monkeypatch):
     """Every test gets its own engine state file: never touch ~/.jbr, never inherit a real quota."""
     path = tmp_path / "jbr-state" / "engine_state.json"
     monkeypatch.setenv("JBR_STATE", str(path))
+    # ...and its own runs dir and ledger: no test writes run artifacts or ledger lines under the real ~/.jbr
+    monkeypatch.setenv("JBR_RUNS", str(tmp_path / "jbr-runs"))
+    monkeypatch.setenv("JBR_LEDGER", str(tmp_path / "jbr-ledger.jsonl"))
     return path
+
+
+def reports(project):
+    """Where run artifacts for `project` land in tests (the isolated JBR_RUNS)."""
+    from jbr import paths
+    return paths.reports_dir(project)
 
 
 @pytest.fixture

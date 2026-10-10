@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from jbr import router, runner, state
+from jbr import paths, router, runner, state
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_ENGINES = REPO_ROOT / "engines.json"
@@ -31,23 +31,24 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--prompts", default="ops/prompts", help="per-package spec markdown dir (relative to project)")
     ap.add_argument("--engines", default=str(DEFAULT_ENGINES), help="engines.json path")
     ap.add_argument("--available", action="append", default=[], metavar="ENGINE=yes|no", help="override availability (repeatable)")
-    ap.add_argument("--reports", default="ops/reports", help="reports dir (relative to project)")
+    ap.add_argument("--reports", default=None,
+                    help="run-artifact dir (default ~/.jbr/runs/<project key>/reports; relative = inside the project)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("route", help="ask Jev which engine implements each package; writes ops/routing.json")
+    r = sub.add_parser("route", help="ask Jev which engine implements each package; writes ~/.jbr/runs/<key>/routing.json")
     r.add_argument("--dry-run", action="store_true", help="print the request instead of calling TypeSafe")
     r.add_argument("--done", nargs="*", default=[], help="package ids already finished (excluded)")
     r.add_argument("--now", default=None, help="local time hint passed to Jev")
     r.add_argument("--goal", default=None, help="override the goal sentence")
     r.add_argument("--state-json", default=None, help="path to extra state merged into the request")
     r.add_argument("--model", default=router.DEFAULT_MODEL)
-    r.add_argument("--no-write", action="store_true", help="do not write ops/routing.json")
+    r.add_argument("--no-write", action="store_true", help="do not write routing.json")
     r.add_argument("--no-probe", action="store_true",
                    help="use only the engine state file for availability (no live probes; implied by --dry-run)")
 
     x = sub.add_parser("run", help="run one package on an engine synchronously (agy|codex)")
     x.add_argument("wp_id")
-    x.add_argument("--engine", default=None, help="engine key (default: from ops/routing.json)")
+    x.add_argument("--engine", default=None, help="engine key (default: from routing.json)")
     x.add_argument("--extra", default="", help="additional manager instructions")
     x.add_argument("--extra-file", default=None, help="file with additional instructions (e.g. fix-WP-round1.md)")
     x.add_argument("--tag", default="")
@@ -79,7 +80,7 @@ def _parser() -> argparse.ArgumentParser:
     pr.add_argument("engine")
     pr.add_argument("--no-live", action="store_true", help="state file only; never call the engine (UNKNOWN -> exit 0)")
 
-    asg = sub.add_parser("assign", help="the commander's routing: WP=engine pairs -> ops/routing.json (live-checked chains)")
+    asg = sub.add_parser("assign", help="the commander's routing: WP=engine pairs -> routing.json (live-checked chains)")
     asg.add_argument("pairs", nargs="+", metavar="WP=ENGINE", help="e.g. WP01=agy_gemini_pro WP03=codex_astra")
     asg.add_argument("--reason", action="append", default=[], metavar="WP=TEXT", help="one-line rationale per package (repeatable)")
     asg.add_argument("--no-probe", action="store_true", help="state file only for availability (no live probes)")
@@ -96,6 +97,8 @@ def _parser() -> argparse.ArgumentParser:
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--project-only", action="store_true", help="only this project's entries")
 
+    sub.add_parser("paths", help="print where jbr keeps this project's files (pass reportsDir to the Workflow scripts)")
+
     pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
     pk.add_argument("--exclude", default="", help="comma-separated engine keys to skip")
     pk.add_argument("--no-live", action="store_true", help="state file only; never call an engine")
@@ -111,7 +114,7 @@ def _engine_for(a, wp_id: str, project: pathlib.Path) -> str:
         return a.engine
     routing = router.load_routing(project)
     if wp_id not in routing:
-        sys.exit(f"no --engine given and {wp_id} not in ops/routing.json (run `python -m jbr route` first)")
+        sys.exit(f"no --engine given and {wp_id} not in routing.json (run `python -m jbr assign` first)")
     return routing[wp_id]
 
 
@@ -151,7 +154,7 @@ def cmd_route(a) -> int:
         return 0
     print(router.format_routing(doc))
     if not a.no_write:
-        print(f"wrote {project / router.ROUTING_FILE}")
+        print(f"wrote {paths.routing_path(project)}")
     return 0
 
 
@@ -234,7 +237,7 @@ def _hoist_globals(argv: list[str]) -> list[str]:
     if not argv:
         return argv
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
-                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard"}), None)
+                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
@@ -340,7 +343,7 @@ def cmd_assign(a) -> int:
         flag = f"  [2nd opinion: {so['engine']} p={so['confidence']}{'' if so['engine'] == r['engine'] else '  <- disagrees'}]" if so else ""
         print(f"{wp}: {r['engine']} chain: {' > '.join(r['chain'])}{flag}" + (f"\n      why: {r['reason']}" if r["reason"] else ""))
     if not a.no_write:
-        print(f"wrote {project / router.ROUTING_FILE}")
+        print(f"wrote {paths.routing_path(project)}")
     return 0
 
 
@@ -373,12 +376,22 @@ def cmd_scorecard(a) -> int:
     return 0
 
 
+def cmd_paths(a) -> int:
+    project = pathlib.Path(a.project).resolve()
+    from jbr import ledger
+    print(json.dumps({"project": str(project), "runs_dir": str(paths.project_dir(project)),
+                      "reports_dir": str(paths.reports_dir(project, a.reports)),
+                      "routing": str(paths.routing_path(project)),
+                      "ledger": str(ledger.ledger_path()), "engine_state": str(state.state_path())}, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = _hoist_globals(list(sys.argv[1:] if argv is None else argv))
     a = _parser().parse_args(argv)
     return {"route": cmd_route, "run": cmd_run, "spawn": cmd_spawn, "wait": cmd_wait,
             "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick,
-            "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard}[a.cmd](a)
+            "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths}[a.cmd](a)
 
 
 if __name__ == "__main__":

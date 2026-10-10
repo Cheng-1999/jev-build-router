@@ -4,7 +4,7 @@ The commander (the main Claude Code session) assigns packages itself (`jbr assig
 the evidence it assigns from. After a build, `jbr record <result.json>` appends one line per
 package from the build_dag.js result (the list the Workflow returns): who implemented it, the
 final verdict, review/fix rounds, confirmed defects, quota hits, and the engine minutes read from
-the project's ops/reports/run-*.done markers. `jbr scorecard` aggregates it per engine.
+the project's run-*.done markers (paths.reports_dir). `jbr scorecard` aggregates it per engine.
 
 Ledger: ~/.jbr/ledger.jsonl (override JBR_LEDGER), one JSON object per line, append-only, shared
 by every project on this machine (the same scope as the engine state file).
@@ -17,7 +17,7 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Any
 
-from jbr import runner
+from jbr import paths, runner
 
 LAST_RESORT = "claude_subagent"
 
@@ -36,12 +36,12 @@ def _implementer(row: dict) -> str:
     return row.get("engine") or "unknown"
 
 
-def _minutes(project: pathlib.Path | None, wp: str, reports_dir: str) -> float | None:
+def _minutes(project: pathlib.Path | None, wp: str, reports_dir: str | None) -> float | None:
     """Sum of engine minutes over this package's run markers (impl + fix tags); None if none found."""
     if project is None:
         return None
     total, found = 0.0, False
-    for f in (project / reports_dir).glob(f"{runner.RUN_PREFIX}-{wp}*.done"):
+    for f in paths.reports_dir(project, reports_dir).glob(f"{runner.RUN_PREFIX}-{wp}*.done"):
         stem_wp, tag = runner.split_stem(f.name[len(runner.RUN_PREFIX) + 1:-len(".done")], [wp])
         if stem_wp != wp:
             continue  # WP1 must not pick up WP10's markers
@@ -53,7 +53,7 @@ def _minutes(project: pathlib.Path | None, wp: str, reports_dir: str) -> float |
 
 
 def entries_from_build(results: list[dict], *, project: str | os.PathLike | None = None, build: str = "",
-                       reports_dir: str = "ops/reports", hints: dict[str, dict] | None = None,
+                       reports_dir: str | None = None, hints: dict[str, dict] | None = None,
                        now: datetime | None = None) -> list[dict]:
     """One ledger entry per package of a build_dag.js result list."""
     root = pathlib.Path(project).resolve() if project else None
