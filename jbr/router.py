@@ -246,6 +246,41 @@ def _post(body: dict, api_key: str, timeout: int = 90) -> dict:
     return out
 
 
+def assign(project_root: str | os.PathLike, assignments: dict[str, str], engines: dict[str, dict],
+           reasons: dict[str, str] | None = None, *, availability: dict[str, dict] | None = None,
+           write: bool = True, second_opinion: dict | None = None) -> dict[str, Any]:
+    """The commander's routing: `assignments` maps package -> engine, chosen by the main session from
+    the specs, the code and `jbr scorecard`. Same ops/routing.json shape as route(), so build_dag.js
+    and `run`/`spawn` read it unchanged. An engine that is unknown or not usable right now is refused
+    (the commander re-assigns; a silent substitution would hide the decision). `second_opinion` is an
+    optional route() document kept beside the decision for the record, never applied."""
+    reasons = reasons or {}
+    usable = usable_engines(engines, availability)
+    routing: dict[str, dict] = {}
+    for wp, eng in assignments.items():
+        if eng not in engines:
+            raise ValueError(f"{wp}: unknown engine {eng!r}; known: {sorted(engines)}")
+        if eng not in usable and eng != LAST_RESORT:
+            live = (availability or {}).get(eng, {})
+            raise ValueError(f"{wp}: engine {eng} is not usable now ({live.get('status', 'disabled')}"
+                             f"{' until ' + live['until'] if live.get('until') else ''}); assign another")
+        routing[wp] = {"engine": eng, "assigned_by": "commander", "reason": reasons.get(wp, ""),
+                       "chain": chain_for(eng, engines, availability)}
+        if second_opinion:
+            other = second_opinion.get("routing", {}).get(wp)
+            if other:
+                routing[wp]["second_opinion"] = {"engine": other["engine"], "confidence": other.get("confidence"),
+                                                 "model": second_opinion.get("model")}
+    doc = {"model": "commander", "routing": routing, "chains": {wp: r["chain"] for wp, r in routing.items()}}
+    if availability is not None:
+        doc["availability"] = availability
+    if write:
+        path = pathlib.Path(project_root) / ROUTING_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    return doc
+
+
 def route(project_root: str | os.PathLike, packages: list[dict], engines: dict[str, dict],
           extra_state: dict | None = None, *, done: set[str] | None = None, api_key: str | None = None,
           dry_run: bool = False, post: Callable[[dict, str], dict] | None = None,

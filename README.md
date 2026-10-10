@@ -76,6 +76,26 @@ PYTHONPATH="$JBR" python -m jbr pick --exclude agy_gemini_pro
 
 Global options go before the subcommand: `--project <root>` (default cwd), `--packages ops/work_packages.json`, `--prompts ops/prompts`, `--reports ops/reports`, `--engines <path>` (default: this repo's `engines.json`), `--available <engine>=yes|no` (repeatable). They are also accepted after the subcommand (the spawned child relies on that).
 
+## Commander routing and the engine ledger (default since 2026-10-10)
+
+The main Claude Code session assigns packages; a decision model is an optional second opinion.
+
+```bash
+PYTHONPATH="$JBR" python -m jbr scorecard                      # per-engine track record (~/.jbr/ledger.jsonl)
+PYTHONPATH="$JBR" python -m jbr assign WP01=agy_gemini_pro WP02=codex_astra \
+    --reason "WP02=billing path; non-Claude family for review" [--second-opinion]
+PYTHONPATH="$JBR" python -m jbr record build_result.json --build my-build   # after build_dag.js returns
+```
+
+- `assign` probes live, refuses unknown or exhausted engines (no silent substitution), and writes the same
+  `ops/routing.json` shape as `route` (`model: "commander"`, per package `engine`, `reason`, `chain`), so
+  `build_dag.js`, `run` and `spawn` read it unchanged. `--second-opinion` also asks the model at
+  `JBR_DECISION_URL` (use a local Clef server, free) and stores its pick as `second_opinion`; it is never applied.
+- `record` takes the list `build_dag.js` returns and appends one line per package: the engine whose implement
+  run succeeded (not the first one tried), final verdict, fix rounds, confirmed defects, quota hits, and
+  minutes summed from the project's `run-<WP>*.done` markers. `scorecard` aggregates per engine.
+- `route` (a decision model routes every package) remains for comparison.
+
 ## engines.json
 
 Mapping `engine_key -> {description, runner, model, effort, parallel_limit, available}`.
