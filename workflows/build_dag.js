@@ -21,7 +21,8 @@
 //   routing: { WP04: 'claude_subagent',       // pin: that engine first, then the engineChain entries after it
 //              WP05: ['agy_gemini_pro', 'codex_astra', 'claude_subagent'],  // explicit chain (ops/routing.json .chains)
 //              WP06: 'auto' },                // or no entry at all (the DEFAULT): walk engineChain
-//   engineChain: ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'claude_subagent'],  // default priority order
+//   engineChain: ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', 'claude_subagent'],  // default priority order
+//   engineWaits: { ollama_qwen: 16 },          // 8.75-minute marker waits per engine before CRASH (default 8 = ~70 min; local Qwen 16)
 //   engineArgs: { agy_gemini_pro: '--timeout 55m' },   // extra `python -m jbr spawn` args per engine (optional)
 //   jbrArgs: '--engines /c/path/engines.json',          // global jbr options for probe + spawn (optional)
 //   fallbackEngine: 'claude_subagent',        // appended to every chain as the last resort (default claude_subagent)
@@ -63,8 +64,9 @@ const ENGINE_ARGS = A.engineArgs || {}
 const JBR_ARGS = A.jbrArgs ? ' ' + A.jbrArgs : ''
 const RUN_PREFIX = 'run'
 const LAST_RESORT = 'claude_subagent'
-const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', LAST_RESORT]
+const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', LAST_RESORT]
 const ENGINE_CHAIN = Array.isArray(A.engineChain) && A.engineChain.length ? A.engineChain : DEFAULT_CHAIN
+const ENGINE_WAITS = Object.assign({ ollama_qwen: 16 }, A.engineWaits || {})
 const FALLBACK = A.fallbackEngine || LAST_RESORT
 const isExternal = e => e !== LAST_RESORT
 const uniq = xs => [...new Set(xs.filter(Boolean))]
@@ -109,7 +111,7 @@ ${extraText}
 1. cd ${POSIX} && PYTHONPATH="${JBR}" python -m jbr${JBR_ARGS} --project "${POSIX}" spawn ${id} --engine ${eng}${tag ? ' --tag ' + tag : ''}${extra}${engArgs}
    (returns immediately and prints the marker path ${REPORTS}/${stem}.done)
 2. Wait for the marker with repeated Bash calls, each: cd ${POSIX} && for i in $(seq 1 17); do [ -f ${REPORTS}/${stem}.done ] && break; sleep 30; done; cat ${REPORTS}/${stem}.done 2>/dev/null || echo STILL-RUNNING
-   Repeat until it prints an exit code (up to 8 times, ~70 minutes). The marker reads "<exit> <minutes>min <STATUS> [reset-hint]": STATUS QUOTA = the engine hit its quota (429 / RESOURCE_EXHAUSTED / fast exit with no work) and did nothing; CRASH = it died without output; OK = it ran. A marker with only two tokens: exit -1 is CRASH, anything else OK. No marker after 8 waits and no agy/codex process running: CRASH.
+   Repeat until it prints an exit code (up to ${ENGINE_WAITS[eng] || 8} times, ~${Math.round((ENGINE_WAITS[eng] || 8) * 8.75)} minutes). The marker reads "<exit> <minutes>min <STATUS> [reset-hint]": STATUS QUOTA = the engine hit its quota (429 / RESOURCE_EXHAUSTED / fast exit with no work) and did nothing; CRASH = it died without output; OK = it ran. A marker with only two tokens: exit -1 is CRASH, anything else OK. No marker after ${ENGINE_WAITS[eng] || 8} waits and no agy/codex process running: CRASH.
 3. Only if STATUS is OK: cd ${POSIX} && ${TEST_CMD} 2>&1 | tail -5 ; and read the last 60 lines of ${REPORTS}/${stem}.log. Otherwise do NOT run tests; read the last 20 lines of the log for the notes.
 A QUOTA run is already recorded in the engine state file by jbr (later probes say EXHAUSTED until the reset).
 Return: engine_status ('ok' | 'quota' | 'crash', from STATUS), reset_hint (the text after STATUS, else ''), the engine's final test summary (or 'no engine work: <status>'), the files it says it created/changed, any acceptance items it reported as unsatisfied, and the exit code in notes.`

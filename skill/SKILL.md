@@ -17,20 +17,21 @@ JBR=/c/Users/a8878/dev/jev-build-router   # Mac: /Users/ad/code/jev-build-router
 cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 ```
 
-## Default engine chain (user rule, 2026-10-02)
+## Default engine chain (user rule 2026-10-02; local Qwen added 2026-10-10)
 
 agy is the base worker. Every implement/fix step prefers, in order:
 
 1. `agy_gemini_pro` (agy, gemini-3.1-pro-high)
 2. `agy_claude_opus` (agy, claude-opus-5-5-high; shares ONE Claude quota bucket with any other agy Claude model, e.g. Sonnet)
 3. `codex_astra` (codex, gpt-6-astra; flags `-s workspace-write`, there is no `--full-auto`)
-4. `claude_subagent` (Claude Code workflow subagent; last resort, never quota-probed)
+4. `ollama_qwen` (local Qwen 3.8 27B on Ollama, driven by codex `--oss --local-provider ollama`; free, never quota-limited)
+5. `claude_subagent` (Claude Code workflow subagent; last resort, never quota-probed)
 
-Opt-in local engine (Mac only, where Ollama runs): `ollama_qwen` (codex `--oss --local-provider ollama`, qwen3.8:27b-mlx). `available: false` in `engines.json`, so `route`/`pick` never choose it; use it explicitly with `spawn WP --engine ollama_qwen`, or let routing consider it with `--available ollama_qwen=yes`. Free and never quota-limited, but slow (codex sends ~140k tokens of context: several minutes even for a trivial package) and much weaker than the cloud engines; good for small well-specified packages or when every cloud engine is exhausted. Its probe asks Ollama directly (`ollama run --think=false <m> "Reply only READY."`), seconds, not codex.
+**Local Qwen saves Claude quota (user rule, 2026-10-10).** It is in every default chain before the Claude subagent, so a package whose cloud engines are all out of quota goes to Qwen first. It exists only where Ollama runs (the Mac): elsewhere its probe fails and the chain skips it. It is slow (codex sends ~140k tokens of context: several minutes even for a trivial package; build_dag runners wait up to ~140 min for it instead of ~70) and weaker than the cloud engines on multi-file work. Assign it directly for small, fully specified, low-risk packages. Its probe asks Ollama directly (`ollama run --think=false <m> "Reply only READY."`), seconds, not codex. Do not run the local Clef 27B server while Qwen is building: both are ~17 GB.
 
 Router decisions may use Clef: set `JBR_DECISION_URL=http://127.0.0.1:8000/v1/systemone` and `route --model clef-flash-4bit` for a local server, with no key. Hosted Workers AI requires `CLOUDFLARE_AI_TOKEN` and a Workers AI endpoint in `JBR_DECISION_URL`; an arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. The default Jev endpoint alone reads `TYPESAFE_API_KEY`.
 
-An engine out of quota is skipped until its reset time, then preferred again automatically. Availability is live, not configured: `engines.json` has `priority` 1..4 and every engine `available: true`; the shared state file `~/.jbr/engine_state.json` (override `JBR_STATE`) records `exhausted_until` per quota bucket.
+An engine out of quota is skipped until its reset time, then preferred again automatically. Availability is live, not configured: `engines.json` has `priority` 1..5 and every engine `available: true`; the shared state file `~/.jbr/engine_state.json` (override `JBR_STATE`) records `exhausted_until` per quota bucket.
 
 ```
 PYTHONPATH="$JBR" python -m jbr probe agy_gemini_pro   # AVAILABLE (exit 0) | EXHAUSTED <utc-until> (3) | UNAVAILABLE <reason> (4)
@@ -55,11 +56,11 @@ Decide from, in this order:
    confirmed defects, minutes, quota hits; ledger `~/.jbr/ledger.jsonl`). Prefer the engine with the
    lowest defects/fix rounds on packages of the same kind and size.
 3. **The rubric**:
-   - default chain order agy Gemini > agy Claude Opus > Codex > Claude subagent (spend agy/Codex quota before Claude's);
+   - default chain order agy Gemini > agy Claude Opus > Codex > local Qwen > Claude subagent (spend agy/Codex/Qwen before Claude's quota);
    - review diversity: the reviewers are Claude, so a non-Claude implementer gets its mistakes caught rather than shared;
      prefer Gemini or Codex for subtle state/billing/security code;
    - legal, privacy or user-facing wording: Claude subagent (and say why);
-   - small, fully specified, low-risk packages with Claude/agy quota short: `ollama_qwen` (free, slow; opt in with `--engine`);
+   - small, fully specified, low-risk packages (a doc edit, a config line, one function with its tests): assign `ollama_qwen` outright; it is free;
    - keep packages that edit the same file on the same engine or in dependency order.
 4. **Optional second opinion**: `--second-opinion` asks the decision model at `JBR_DECISION_URL` and records
    its pick beside yours (never applied). Use the **local Clef 27B** (free):

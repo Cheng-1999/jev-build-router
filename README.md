@@ -55,7 +55,8 @@ agy is the base worker. Each implement/fix step prefers, in order (`priority` in
 | 1 | `agy_gemini_pro` | agy, gemini-3.1-pro-high |
 | 2 | `agy_claude_opus` | agy, claude-opus-5-5-high |
 | 3 | `codex_astra` | codex, gpt-6-astra (`-s workspace-write`) |
-| 4 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
+| 4 | `ollama_qwen` | local Qwen 3.8 27B on Ollama via codex `--oss` (Mac only; free, slow; runners wait ~140 min) |
+| 5 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
 
 An engine that is out of quota is skipped; once its quota resets it is preferred again automatically. Availability is decided live, not by `available` flags:
 

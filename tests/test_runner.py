@@ -251,8 +251,10 @@ def test_build_command_codex_local_provider(tmp_path):
     assert "Read that file in full" in cmd[-1]
 
 
-def test_shipped_ollama_engine_is_opt_in():
+def test_shipped_ollama_engine_sits_before_claude_in_the_chain():
     engines = router.load_engines(REPO / "engines.json")
     assert engines["ollama_qwen"]["local_provider"] == "ollama"
-    assert engines["ollama_qwen"]["available"] is False  # never auto-routed; --engine / --available opt in
-    assert "ollama_qwen" not in router.available_engines(engines)
+    assert "ollama_qwen" in router.available_engines(engines)   # on by default; its live probe decides
+    assert router.by_priority(engines)[-2:] == ["ollama_qwen", "claude_subagent"]
+    assert router.chain_for("codex_astra", engines) == ["codex_astra", "agy_gemini_pro", "agy_claude_opus",
+                                                         "ollama_qwen", "claude_subagent"]
