@@ -71,6 +71,8 @@ Decide from, in this order:
 
 ## Handoff packet checklist (what made the 2026-10-06 packages pass in one fix round)
 
+Worked example: `examples/2026-10-06-clef-backend/` in this repo (plan, four packets, who built what).
+
 Every `ops/prompts/<WP>.md` (or the plan's `--prompts` dir) must have, before you assign:
 - **Why**: two or three sentences of context the engine cannot infer.
 - **Owned files**: the exact paths; everything else is read-only.
