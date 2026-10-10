@@ -1,0 +1,72 @@
+{
+  "goal": "Add Cloudflare Clef as a second System One decision backend for the two TypeSafe rungs (tier 0c name select, category select) and let the eval harnesses score Jev, hosted Clef and a local Clef server side by side. Default behaviour stays byte-identical (Jev, or nothing when keyless); switching production is a later human decision made from the eval numbers.",
+  "rules": "Project rules live in CLAUDE.md at the repo root: read its sections on .env keys, tests and naming before editing. Run the suite with: PYTHONIOENCODING=utf-8 ./.venv/bin/python smoke_test.py (macOS path; never the system python). Any new env var that can reach a network or a bill is set to \"\" (never popped) at the top of smoke_test.py and tools/*_eval.py. No test may make a real network call to api.typesafe.ai or api.cloudflare.com. User-visible strings exist in all 5 locales or not at all.",
+  "work_packages": [
+    {
+      "id": "WP01",
+      "title": "Decision backend seam: ig_places/decision.py (Jev | Clef on Workers AI)",
+      "goal": "One module that decides which System One backend the TypeSafe rungs talk to, and builds the SDK client for it.",
+      "depends_on": [],
+      "files": ["ig_places/decision.py", "ig_places/aicost.py", "smoke_test.py", ".env.example"],
+      "acceptance": [
+        "DECISION_BACKEND unset/blank/'jev' -> exactly today's TypeSafeClient (same model, timeout, retry); keyless stays disabled",
+        "DECISION_BACKEND='clef' -> TypeSafeClient over a custom httpx2 transport that POSTs to Cloudflare Workers AI and unwraps the {result: ...} envelope",
+        "Unknown DECISION_BACKEND value -> enabled() is False (fail closed), never falls back to another backend",
+        "aicost prices for clef and clef-flash",
+        "smoke_test blanks the new env vars at the top and has checks for all of the above with a fake inner transport; zero real network"
+      ],
+      "tests": "PYTHONIOENCODING=utf-8 ./.venv/bin/python smoke_test.py",
+      "spec_refs": ["CLAUDE.md", "ig_places/typesafe_select.py", "ig_places/aicost.py", "ops/reports/NAMING_ARCHITECTURE.md (Tier 0c)"],
+      "routing_hints": {"size": "medium", "state_consistency_critical": true, "touches_billing_and_secrets": true}
+    },
+    {
+      "id": "WP02",
+      "title": "Wire typesafe_select and typesafe_category through decision.py",
+      "goal": "Both production rungs get their client, model name and enabled() gate from decision.py; nothing else about them changes.",
+      "depends_on": ["WP01"],
+      "files": ["ig_places/typesafe_select.py", "ig_places/typesafe_category.py", "smoke_test.py"],
+      "acceptance": [
+        "Keyless and default-backend behaviour byte-identical (existing tier 0c / category checks pass unchanged)",
+        "Trail steps and aicost.record carry the active backend's pinned model (clef-flash when DECISION_BACKEND=clef)",
+        "typesafe_select.MODEL stays 'jev-1.13.0' (the eval harness and video_eval import it)",
+        "_no_typesafe guard still intercepts every request on both backends"
+      ],
+      "tests": "PYTHONIOENCODING=utf-8 ./.venv/bin/python smoke_test.py",
+      "spec_refs": ["CLAUDE.md", "ig_places/decision.py", "ops/reports/NAMING_ARCHITECTURE.md (Tier 0c)"],
+      "routing_hints": {"size": "small", "state_consistency_critical": true}
+    },
+    {
+      "id": "WP03",
+      "title": "Eval harnesses: --backend jev|clef|local with per-backend cache and latency",
+      "goal": "tools/typesafe_eval.py and tools/category_eval.py can score the same gold set on Jev, hosted Clef, or a local Clef server, without ever mixing their cached answers.",
+      "depends_on": ["WP01"],
+      "files": ["tools/typesafe_eval.py", "tools/category_eval.py"],
+      "acceptance": [
+        "--backend local --base-url http://127.0.0.1:8000 runs free (no --spend-real-money, no key) and refuses any non-loopback URL",
+        "jev and clef stay behind --spend-real-money; TYPESAFE_BASE_URL stays blanked at import",
+        "Cache key includes backend and model; a local answer can never satisfy a Jev lookup or vice versa",
+        "Per-row latency recorded; p50/p95 printed per backend",
+        "Default invocation (no flags) output unchanged"
+      ],
+      "tests": "PYTHONIOENCODING=utf-8 ./.venv/bin/python smoke_test.py && PYTHONIOENCODING=utf-8 ./.venv/bin/python tools/typesafe_eval.py --limit 5",
+      "spec_refs": ["CLAUDE.md", "tools/typesafe_eval.py", "tools/category_eval.py", "ig_places/decision.py"],
+      "routing_hints": {"size": "medium", "numerical_difficulty": "low"}
+    },
+    {
+      "id": "WP04",
+      "title": "Docs and disclosure: naming architecture, credentials, privacy processor list",
+      "goal": "Every place that documents or discloses the TypeSafe rungs also describes the Clef backend, accurately and with no claim that it is live.",
+      "depends_on": ["WP02", "WP03"],
+      "files": ["ops/reports/NAMING_ARCHITECTURE.md", "ops/CREDENTIALS.md", "templates/privacy.html", "ops/reports/COUNTRY_COMPLIANCE_NOTES_2026-09-25.md"],
+      "acceptance": [
+        "NAMING_ARCHITECTURE Tier 0c and category sections describe DECISION_BACKEND, gates, pricing and the per-backend eval",
+        "CREDENTIALS.md has rows for CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_AI_TOKEN (expiry, rotation, where to get it)",
+        "privacy.html processor list names Cloudflare Workers AI beside TypeSafe for candidate/category choice, both languages on the page",
+        "Compliance notes record Cloudflare as a new processor of caption text and the no-retention / no-training statement"
+      ],
+      "tests": "PYTHONIOENCODING=utf-8 ./.venv/bin/python smoke_test.py",
+      "spec_refs": ["CLAUDE.md", "ig_places/decision.py", "https://blog.cloudflare.com/clef-decision-models/"],
+      "routing_hints": {"size": "small", "kind": "documentation_and_legal_text"}
+    }
+  ]
+}
