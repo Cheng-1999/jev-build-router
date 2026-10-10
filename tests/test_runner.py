@@ -4,6 +4,7 @@ import pathlib
 import pytest
 
 from jbr import router, runner
+from tests.conftest import reports
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -92,7 +93,7 @@ def test_run_executes_and_writes_done_marker(project, engines, monkeypatch):
     class P:
         returncode = 3
 
-    def fake_run(cmd, cwd, stdout, stderr, env):
+    def fake_run(cmd, cwd, stdout, stderr, env, stdin=None):
         calls["cmd"] = cmd
         stdout.write("engine transcript\n")
         return P()
@@ -117,7 +118,7 @@ def test_spawn_dry_run_argv(project):
 
 
 def test_wait_polls_until_markers_exist(project):
-    rep = project / "ops" / "reports"
+    rep = reports(project)
     rep.mkdir(parents=True)
     ticks = []
 
@@ -191,8 +192,8 @@ def test_spawn_sets_pythonpath_and_detaches(project, monkeypatch):
 
     monkeypatch.setattr(runner.subprocess, "Popen", FakePopen)
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    (project / "ops" / "reports").mkdir(parents=True)
-    (project / "ops" / "reports" / "run-WP01.done").write_text("0 1.0min\n", encoding="utf-8")
+    (reports(project)).mkdir(parents=True)
+    (reports(project) / "run-WP01.done").write_text("0 1.0min\n", encoding="utf-8")
     res = runner.spawn(project, "WP01", ["--engine", "codex_astra"])
     assert res["pid"] == 77 and res["argv"] == seen["argv"]
     assert seen["argv"][1:5] == ["-m", "jbr", "run", "WP01"]
@@ -204,8 +205,8 @@ def test_spawn_sets_pythonpath_and_detaches(project, monkeypatch):
         assert seen["kw"]["creationflags"] & runner.subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         assert seen["kw"]["start_new_session"] is True
-    assert (project / "ops" / "reports" / "run-WP01.stdout").read_text(encoding="utf-8") == "child stdout\n"
-    assert not (project / "ops" / "reports" / "run-WP01.done").exists()  # stale marker removed before launch
+    assert (reports(project) / "run-WP01.stdout").read_text(encoding="utf-8") == "child stdout\n"
+    assert not (reports(project) / "run-WP01.done").exists()  # stale marker removed before launch
 
 
 def test_split_stem_and_status_with_hyphenated_ids(project):
@@ -214,7 +215,7 @@ def test_split_stem_and_status_with_hyphenated_ids(project):
     assert runner.split_stem("WP-X-fix1") == ("WP", "X-fix1")  # no known ids: first `-` splits
     assert runner.split_stem("WP-X-fix1", ["WP-X", "WP"]) == ("WP-X", "fix1")
     assert runner.split_stem("WP-X", ["WP-X"]) == ("WP-X", "")
-    rep = project / "ops" / "reports"
+    rep = reports(project)
     rep.mkdir(parents=True)
     (rep / "run-WP-X-fix1.prompt.md").write_text("p", encoding="utf-8")
     (rep / "run-WP-X-fix1.done").write_text("2 0.5min\n", encoding="utf-8")
@@ -234,12 +235,12 @@ def test_compose_fix_writes_fix_file_only_for_fix_verdicts(project):
     src.write_text(json.dumps({"result": review}), encoding="utf-8")
     rows = runner.compose_fix(project, src, 1)
     assert [(r["wp"], r["verdict"], r["confirmed"], r["low"]) for r in rows] == [("WP01", "fix", 1, 1), ("WP02", "accept", 0, 0)]
-    fix = (project / "ops" / "reports" / "fix-WP01-round1.md").read_text(encoding="utf-8")
+    fix = (reports(project) / "fix-WP01-round1.md").read_text(encoding="utf-8")
     assert fix.startswith("FIX ROUND 1.")
     assert "1. [high] sign()" in fix and "2. [low] docstring" in fix
     assert "- tests/test_other.py" in fix and "NOT caught" in fix
-    assert not (project / "ops" / "reports" / "fix-WP02-round1.md").exists()
-    assert (project / "ops" / "reports" / "review-WP02-round1.json").exists()
+    assert not (reports(project) / "fix-WP02-round1.md").exists()
+    assert (reports(project) / "review-WP02-round1.json").exists()
 
 
 def test_build_command_codex_local_provider(tmp_path):

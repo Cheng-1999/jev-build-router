@@ -1,7 +1,7 @@
 """Ask Jev (TypeSafe System One) which engine implements each work package.
 
 One batch request: one `choice` question per package, criteria = the available
-engine keys. Result written to <project_root>/ops/routing.json as
+engine keys. Result written to paths.routing_path(project) (~/.jbr/runs/<key>/routing.json) as
 {"model": ..., "state": ..., "routing": {"WP04": {"engine", "confidence", "probabilities"}, ...}}.
 
 Package attributes shown to Jev come from each package's optional `routing_hints`
@@ -25,13 +25,16 @@ import urllib.request
 import urllib.parse
 from typing import Any, Callable
 
+from jbr import paths
+
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 # Any System One-compatible endpoint: a local Clef server (clef_mlx.py serve -> http://127.0.0.1:8000/v1/systemone,
 # no key needed) or Cloudflare Workers AI (.../ai/run/@cf/cloudflare/clef, answers wrapped in `result`).
 DECISION_URL_ENV = "JBR_DECISION_URL"
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_MODEL = "jev-latest"
-ROUTING_FILE = pathlib.Path("ops") / "routing.json"
+# routing.json lives in paths.routing_path(project) (~/.jbr/runs/<key>/routing.json); ops/routing.json
+# inside the project is only read, as a fallback for plans routed before 2026-10-10.
 
 DEFAULT_GOAL = (
     "Finish, review and audit the build fastest without sacrificing correctness. Every package is "
@@ -250,7 +253,7 @@ def assign(project_root: str | os.PathLike, assignments: dict[str, str], engines
            reasons: dict[str, str] | None = None, *, availability: dict[str, dict] | None = None,
            write: bool = True, second_opinion: dict | None = None) -> dict[str, Any]:
     """The commander's routing: `assignments` maps package -> engine, chosen by the main session from
-    the specs, the code and `jbr scorecard`. Same ops/routing.json shape as route(), so build_dag.js
+    the specs, the code and `jbr scorecard`. Same routing.json shape as route(), so build_dag.js
     and `run`/`spawn` read it unchanged. An engine that is unknown or not usable right now is refused
     (the commander re-assigns; a silent substitution would hide the decision). `second_opinion` is an
     optional route() document kept beside the decision for the record, never applied."""
@@ -275,7 +278,7 @@ def assign(project_root: str | os.PathLike, assignments: dict[str, str], engines
     if availability is not None:
         doc["availability"] = availability
     if write:
-        path = pathlib.Path(project_root) / ROUTING_FILE
+        path = paths.routing_path(project_root)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
     return doc
@@ -324,27 +327,29 @@ def route(project_root: str | os.PathLike, packages: list[dict], engines: dict[s
     if availability is not None:
         doc["availability"] = availability
     if write:
-        path = pathlib.Path(project_root) / ROUTING_FILE
+        path = paths.routing_path(project_root)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     return doc
 
 
+def load_routing_doc(project_root: str | os.PathLike) -> dict:
+    """routing.json from the runs dir, else the legacy in-project file, else {}."""
+    for path in (paths.routing_path(project_root), paths.legacy_routing_path(project_root)):
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    return {}
+
+
 def load_routing(project_root: str | os.PathLike) -> dict[str, str]:
     """{WP: engine} from ops/routing.json, or {} when absent."""
-    path = pathlib.Path(project_root) / ROUTING_FILE
-    if not path.exists():
-        return {}
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc = load_routing_doc(project_root)
     return {wp: r["engine"] for wp, r in doc.get("routing", {}).items()}
 
 
 def load_chains(project_root: str | os.PathLike) -> dict[str, list[str]]:
     """{WP: [engine, ...]} fallback chains from ops/routing.json (pre-chain files: [engine])."""
-    path = pathlib.Path(project_root) / ROUTING_FILE
-    if not path.exists():
-        return {}
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc = load_routing_doc(project_root)
     return {wp: list(r.get("chain") or [r["engine"]]) for wp, r in doc.get("routing", {}).items()}
 
 

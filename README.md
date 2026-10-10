@@ -8,7 +8,10 @@ Pure Python 3.12 standard library. No dependencies (pytest only for tests).
 jev-build-router/
   engines.json              default engine table (descriptions are what Jev reads)
   jbr/                      python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick
-    router.py               Jev batch routing -> ops/routing.json (engine + fallback chain per package)
+    router.py               routing.json: commander `assign` or decision-model `route` (engine + fallback chain)
+    paths.py                where jbr keeps files: ~/.jbr/runs/<project key>/ (never inside the project)
+    queue.py                backlog lane: one engine (local Qwen), one package at a time, in git worktrees
+    ledger.py               engine ledger + scorecard
     runner.py               prompt composition, agy/codex commands, spawn, .done markers, compose-fix
     state.py                engine availability: state file, reset-hint parsing, live probe, pick
     cli.py
@@ -28,14 +31,14 @@ export TYPESAFE_API_KEY=...                      # only needed for a real `route
 
 PYTHONPATH="$JBR" python -m jbr --help
 PYTHONPATH="$JBR" python -m jbr route --dry-run                    # print the Jev questions, no API call
-PYTHONPATH="$JBR" python -m jbr route --done WP01 WP02 --now 09:30 # writes ops/routing.json
+PYTHONPATH="$JBR" python -m jbr route --done WP01 WP02 --now 09:30 # writes ~/.jbr/runs/<key>/routing.json
 PYTHONPATH="$JBR" python -m jbr --available codex_astra=yes route  # override engine availability
 PYTHONPATH="$JBR" python -m jbr run WP05 --dry-run                 # compose prompt, print argv (engine from routing.json)
 PYTHONPATH="$JBR" python -m jbr spawn WP05 WP06 --engine agy_gemini_pro   # detached runs, .done markers
 PYTHONPATH="$JBR" python -m jbr wait WP05 WP06 --timeout-min 70
 PYTHONPATH="$JBR" python -m jbr status
-PYTHONPATH="$JBR" python -m jbr compose-fix review_output.json 1   # -> ops/reports/fix-WP05-round1.md
-PYTHONPATH="$JBR" python -m jbr spawn WP05 --tag fix1 --extra-file ops/reports/fix-WP05-round1.md
+PYTHONPATH="$JBR" python -m jbr compose-fix review_output.json 1   # -> <reports_dir>/fix-WP05-round1.md (`jbr paths`)
+PYTHONPATH="$JBR" python -m jbr spawn WP05 --tag fix1 --extra-file <reports_dir>/fix-WP05-round1.md
 ```
 
 To route with a local Clef server, set `JBR_DECISION_URL=http://127.0.0.1:8000/v1/systemone`
@@ -75,7 +78,7 @@ PYTHONPATH="$JBR" python -m jbr pick --exclude agy_gemini_pro
 
 `pip install -e .` also works (adds a `jbr` console script) but is not required.
 
-Global options go before the subcommand: `--project <root>` (default cwd), `--packages ops/work_packages.json`, `--prompts ops/prompts`, `--reports ops/reports`, `--engines <path>` (default: this repo's `engines.json`), `--available <engine>=yes|no` (repeatable). They are also accepted after the subcommand (the spawned child relies on that).
+Global options go before the subcommand: `--project <root>` (default cwd), `--packages ops/work_packages.json`, `--prompts ops/prompts`, `--reports <dir>` (default `~/.jbr/runs/<project key>/reports`; relative = inside the project), `--engines <path>` (default: this repo's `engines.json`), `--available <engine>=yes|no` (repeatable). They are also accepted after the subcommand (the spawned child relies on that).
 
 ## Commander routing and the engine ledger (default since 2026-10-10)
 
@@ -89,13 +92,46 @@ PYTHONPATH="$JBR" python -m jbr record build_result.json --build my-build   # af
 ```
 
 - `assign` probes live, refuses unknown or exhausted engines (no silent substitution), and writes the same
-  `ops/routing.json` shape as `route` (`model: "commander"`, per package `engine`, `reason`, `chain`), so
+  `routing.json` shape as `route` (`model: "commander"`, per package `engine`, `reason`, `chain`), so
   `build_dag.js`, `run` and `spawn` read it unchanged. `--second-opinion` also asks the model at
   `JBR_DECISION_URL` (use a local Clef server, free) and stores its pick as `second_opinion`; it is never applied.
 - `record` takes the list `build_dag.js` returns and appends one line per package: the engine whose implement
   run succeeded (not the first one tried), final verdict, fix rounds, confirmed defects, quota hits, and
   minutes summed from the project's `run-<WP>*.done` markers. `scorecard` aggregates per engine.
 - `route` (a decision model routes every package) remains for comparison.
+
+## Where jbr keeps files
+
+Nothing is written into the project. Per project (key = its absolute path with separators turned into `-`):
+
+```
+~/.jbr/runs/<key>/reports/       run prompts, engine logs, .done markers, fix files, review json
+~/.jbr/runs/<key>/routing.json   commander / decision-model routing (ops/routing.json is still READ as a legacy fallback)
+~/.jbr/runs/<key>/queue.json     the backlog lane, plus worker.lock, worker.log and worktrees/
+~/.jbr/ledger.jsonl              engine ledger (all projects)
+~/.jbr/engine_state.json         quota / availability state
+```
+
+`python -m jbr --project <root> paths` prints them; pass `.reports_dir` to the Workflow scripts as `reportsDir`.
+`JBR_RUNS`, `JBR_LEDGER`, `JBR_STATE` override the locations. `--reports <dir>` still works (relative = inside the project).
+
+## Backlog lane (`jbr queue`)
+
+Not-urgent or easy packages, worked off unattended by one engine (default `ollama_qwen`), one at a time
+(the Mac serves one Ollama request at a time: two concurrent jobs took as long as two in a row):
+
+```bash
+PYTHONPATH="$JBR" python -m jbr --project . --packages <plan>/work_packages.json --prompts <plan>/prompts queue add WP07 WP08
+PYTHONPATH="$JBR" python -m jbr --project . queue work --detach      # background worker; one per project (pid lock)
+PYTHONPATH="$JBR" python -m jbr --project . queue status
+PYTHONPATH="$JBR" python -m jbr --project . queue review-args        # review_level.js args per finished package
+PYTHONPATH="$JBR" python -m jbr --project . queue fix WP07 <fix.md>  # another round, same worktree
+PYTHONPATH="$JBR" python -m jbr --project . queue clean WP07         # after merge (refuses unreviewed work without --force)
+```
+
+Each package gets a worktree on `jbr/<engine>/<WP>-<stamp>` from a pinned base, with `.venv`/`node_modules`
+symlinked in; the worker runs the engine, then the package's test command, records changed files and the
+test tail, and moves on. It never commits, pushes or reviews, and stops when the engine's probe fails.
 
 ## engines.json
 
@@ -139,11 +175,11 @@ Top-level keys (both optional): `rules` is a project-specific line PREPENDED to 
 
 A bare list of packages is accepted too. `routing_hints` is free-form and passed to Jev verbatim; `depth` (1 = root) is computed from `depends_on` unless the hints set it. `ops/prompts/<WP>.md` is inlined verbatim into the engine prompt when present.
 
-Output `ops/routing.json`: `{"model": "jev-1.13.0", "state": {...}, "routing": {"WP04": {"engine": "agy_gemini_pro", "confidence": 0.62, "probabilities": {...}, "chain": ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "claude_subagent"]}}, "chains": {"WP04": [...]}, "availability": {...}}`.
+Output `routing.json` (in the runs dir; `jbr paths` prints it): `{"model": "jev-1.13.0", "state": {...}, "routing": {"WP04": {"engine": "agy_gemini_pro", "confidence": 0.62, "probabilities": {...}, "chain": ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "claude_subagent"]}}, "chains": {"WP04": [...]}, "availability": {...}}`.
 
 **Jev follows the chain.** `route` first probes every engine (`--dry-run` / `--no-probe`: state file only, no live probe). Jev's request state gets every engine's `priority` and `live_status` (`engine_chain`, plus the same in each engine description) and a `routing_policy`: prefer the highest-priority available engine unless the package's routing hints (numerical difficulty, state consistency, size) clearly favour another available one. EXHAUSTED / UNAVAILABLE engines are never answer criteria; if an answer names one anyway it is replaced by the highest-priority usable engine (`overridden` in the row). Each package's `chain` is Jev's pick, then the other usable engines by priority, ending in `claude_subagent` (a `claude_subagent` pick is the whole chain). Pass `.chains` straight to `build_dag.js` as `routing`. `router.load_chains()` reads them back (pre-chain files: `[engine]`).
 
-## Run artifacts (`ops/reports/`)
+## Run artifacts (`~/.jbr/runs/<project key>/reports/`)
 
 `run-<WP>[-tag].prompt.md` (self-contained prompt), `.log` (engine transcript), `.done` (`"<exit> <minutes>min <STATUS> [reset-hint]"`, STATUS = `OK` | `QUOTA` | `CRASH`, e.g. `3 0.0min QUOTA 2h9m31s`; `-1 <minutes>min` without a status token when `jbr run` itself crashed, traceback appended to `.log`; `wait`/`status` print the status, `runner.engine_status()` reads old and new markers), `.stdout` (detached wrapper), `.last.md` (codex final message). `spawn` exits 2 before launching anything when the engine key is not in `engines.json`. `compose-fix` writes `review-<WP>-round<N>.json` and `fix-<WP>-round<N>.md`.
 
@@ -160,7 +196,7 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
   jbr: "/c/Users/you/dev/jev-build-router", // required when any package is routed to agy/codex
   packages: [{ id: "WP04", depends_on: ["WP03"] }, ...],   // from work_packages.json
   done: ["WP01", "WP02", "WP03"],
-  routing: { WP04: ["agy_claude_opus", "codex_astra", "claude_subagent"],   // ops/routing.json .chains (list)
+  routing: { WP04: ["agy_claude_opus", "codex_astra", "claude_subagent"],   // routing.json .chains (list)
              WP05: "codex_astra",                  // string: pin, then the engineChain entries after it
              WP06: "auto" },                       // or omit the package: walk the whole engineChain (DEFAULT)
   engineChain: ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "claude_subagent"],  // the default
@@ -169,7 +205,7 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
   fallbackEngine: "claude_subagent",     // optional; appended to every chain as the last resort
   maxFixRounds: 2,
   testCmd: "python -m pytest -q",
-  promptsDir: "ops/prompts", reportsDir: "ops/reports",
+  promptsDir: "ops/prompts", reportsDir: "<jbr paths .reports_dir>",   // reportsDir required with external engines
   sourceHint: "src layout under src/pkg",  // optional one-liner in the engineer rules
   rules: "..."                              // optional: replace the COMMON rules text entirely
 }

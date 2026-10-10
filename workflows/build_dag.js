@@ -27,7 +27,8 @@
 //   jbrArgs: '--engines /c/path/engines.json',          // global jbr options for probe + spawn (optional)
 //   fallbackEngine: 'claude_subagent',        // appended to every chain as the last resort (default claude_subagent)
 //   maxFixRounds: 2,
-//   promptsDir: 'ops/prompts', reportsDir: 'ops/reports',
+//   promptsDir: 'ops/prompts',               // absolute, or relative to root
+//   reportsDir: '/Users/me/.jbr/runs/<key>/reports',  // REQUIRED with external engines: `python -m jbr --project <root> paths` .reports_dir
 //   testCmd: 'python -m pytest -q',           // run from posixRoot
 //   rules: '...',                             // COMMON rules text override (optional)
 //   sourceHint: 'src layout under src/pkg'    // one line about where code lives (optional)
@@ -53,15 +54,18 @@ const toPosix = p => p.replace(/^([A-Za-z]):[\\/]/, (m, d) => '/' + d.toLowerCas
 const POSIX = A.posixRoot || toPosix(ROOT)
 const JBR = A.jbr || ''
 const join = (...parts) => [ROOT, ...parts].join(SEP).replace(/[\\/]+/g, SEP)
+const isAbs = p => /^([A-Za-z]:)?[\\/]/.test(p)
+// a dir arg may be absolute (jbr keeps run files in ~/.jbr/runs/<key>, plans may live outside the repo)
+const under = (dir, ...rest) => isAbs(dir) ? [dir, ...rest].join('/').replace(/[\\/]+/g, '/') : join(dir, ...rest)
 const PROMPTS = A.promptsDir || 'ops/prompts'
-const REPORTS = A.reportsDir || 'ops/reports'
+const REPORTS = A.reportsDir || ''
 const TEST_CMD = A.testCmd || 'python -m pytest -q'
 const MAX_FIX_ROUNDS = Number.isInteger(A.maxFixRounds) ? A.maxFixRounds : 2
 const PKGS = Object.fromEntries(A.packages.map(p => [p.id, p.depends_on || []]))
 const DONE = new Set(A.done || [])
 const ROUTING = A.routing || {}
 const ENGINE_ARGS = A.engineArgs || {}
-const JBR_ARGS = A.jbrArgs ? ' ' + A.jbrArgs : ''
+const JBR_ARGS = (A.jbrArgs ? ' ' + A.jbrArgs : '') + (REPORTS ? ` --reports "${REPORTS}"` : '')
 const RUN_PREFIX = 'run'
 const LAST_RESORT = 'claude_subagent'
 const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', LAST_RESORT]
@@ -88,10 +92,11 @@ function chainFor(id) {
 const CHAINS = Object.fromEntries(Object.keys(PKGS).map(id => [id, chainFor(id)]))
 const engineOf = id => CHAINS[id][0]
 if (!JBR && Object.values(CHAINS).some(c => c.some(isExternal))) throw new Error('args.jbr (POSIX path of jev-build-router) is required when a package is routed to an external engine')
+if (!REPORTS && Object.values(CHAINS).some(c => c.some(isExternal))) throw new Error('args.reportsDir is required when a package is routed to an external engine: take .reports_dir from `python -m jbr --project <root> paths` (jbr keeps run files outside the project)')
 // every dependency must be a package in this run or already done; a silent drop would start a package with its dep unbuilt
 for (const [id, deps] of Object.entries(PKGS)) for (const d of deps) if (!DONE.has(d) && !PKGS[d]) throw new Error(`unknown dependency ${d} of ${id}: not in args.packages or args.done`)
 
-const specPath = id => join(PROMPTS, `${id}.md`)
+const specPath = id => under(PROMPTS, `${id}.md`)
 const runStem = (id, tag) => `${RUN_PREFIX}-${id}${tag ? '-' + tag : ''}`
 
 const runnerPrompt = (id, eng, tag, extraFile, extraText) => {
@@ -99,7 +104,7 @@ const runnerPrompt = (id, eng, tag, extraFile, extraText) => {
   const extra = extraFile ? ` --extra-file "${extraFile}"` : ''
   const engArgs = ENGINE_ARGS[eng] ? ' ' + ENGINE_ARGS[eng] : ''
   const writeFix = extraFile ? `
-0b. Write the text between the two marker lines below verbatim to the file ${join(extraFile)} (create it; overwrite if present; marker lines excluded).
+0b. Write the text between the two marker lines below verbatim to the file ${under(extraFile)} (create it; overwrite if present; marker lines excluded).
 <<<<<<<< FIX INSTRUCTIONS
 ${extraText}
 >>>>>>>> FIX INSTRUCTIONS` : ''

@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from jbr import cli, ledger, router
+from jbr import cli, ledger, paths, router
+from tests.conftest import reports
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 10, 10, 1, 0, tzinfo=timezone.utc)
@@ -28,7 +29,7 @@ BUILD = [
 
 @pytest.fixture
 def project(tmp_path):
-    rep = tmp_path / "ops" / "reports"
+    rep = reports(tmp_path)
     rep.mkdir(parents=True)
     (rep / "run-WP01.done").write_text("0 6.2min OK\n")
     (rep / "run-WP01-fix1.done").write_text("0 3.1min OK\n")
@@ -50,7 +51,7 @@ def test_entries_take_the_engine_that_actually_implemented(project):
 
 
 def test_minutes_never_mix_prefix_ids(project):
-    (project / "ops" / "reports" / "run-WP1.done").write_text("0 1.0min OK\n")
+    (reports(project) / "run-WP1.done").write_text("0 1.0min OK\n")
     e = ledger.entries_from_build([{"wp": "WP1", "final": "accept", "history": []}], project=project, now=NOW)[0]
     assert e["minutes"] == 1.0                            # not 1.0 + WP10's 99.0
 
@@ -95,7 +96,7 @@ def test_assign_refuses_dead_or_unknown_engines(tmp_path):
         router.assign(tmp_path, {"WP01": "ollama_qwen"}, _engines())       # available=false, opt-in only
     with pytest.raises(ValueError, match="unknown engine"):
         router.assign(tmp_path, {"WP01": "gpt9"}, _engines())
-    assert not (tmp_path / router.ROUTING_FILE).exists()
+    assert not paths.routing_path(tmp_path).exists()
 
 
 def test_assign_records_second_opinion_without_applying_it(tmp_path):

@@ -1,6 +1,6 @@
 """Drive one work package through an external engine (agy or codex), headless.
 
-Artifacts under <project_root>/ops/reports/:
+Artifacts under paths.reports_dir(project) (~/.jbr/runs/<project key>/reports/ unless --reports says otherwise):
   run-<WP>[-tag].prompt.md   the self-contained prompt (engine reads it via a file pointer)
   run-<WP>[-tag].log         engine transcript
   run-<WP>[-tag].done        "<exit code> <minutes>min <STATUS> [reset-hint]" once finished;
@@ -23,6 +23,8 @@ import sys
 import time
 import traceback
 from typing import Any
+
+from jbr import paths
 
 RUN_PREFIX = "run"
 DEFAULT_TIMEOUT = "55m"
@@ -54,8 +56,8 @@ def find_package(packages: list[dict], wp_id: str) -> dict:
     return wp
 
 
-def report_paths(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str = "ops/reports") -> dict[str, pathlib.Path]:
-    rep = pathlib.Path(project_root) / reports_dir
+def report_paths(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None) -> dict[str, pathlib.Path]:
+    rep = paths.reports_dir(project_root, reports_dir)
     stem = f"{RUN_PREFIX}-{wp_id}" + (f"-{tag}" if tag else "")
     return {
         "dir": rep,
@@ -215,7 +217,7 @@ def _env() -> dict[str, str]:
 def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: dict[str, dict],
         packages_path: str | os.PathLike, prompts_dir: str | os.PathLike = "ops/prompts", *,
         extra: str = "", tag: str = "", timeout: str = DEFAULT_TIMEOUT, dry_run: bool = False,
-        reports_dir: str = "ops/reports", rules: str | None = None) -> dict[str, Any]:
+        reports_dir: str | None = None, rules: str | None = None) -> dict[str, Any]:
     """Compose the prompt, run the engine synchronously, write the .done marker.
 
     Returns {"wp", "engine", "cmd", "exit", "minutes", "paths"}; exit is None on dry-run
@@ -255,7 +257,9 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
         with open(paths["log"], "w", encoding="utf-8") as fh:
             fh.write(f"# {engine_key} run {wp_id} model={engine.get('model')} effort={engine.get('effort')}\n\n")
             fh.flush()
-            p = subprocess.run(cmd, cwd=root, stdout=fh, stderr=subprocess.STDOUT, env=_env())
+            # stdin closed: `codex exec` reads stdin when it is not a TTY and would wait forever on an
+            # inherited pipe (2026-10-10, a foreground `jbr queue work`)
+            p = subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, env=_env())
         dt = (time.time() - t0) / 60
         status, hint = classify_run(p.returncode, dt, paths["log"].read_text(encoding="utf-8", errors="replace"))
         paths["done"].write_text(f"{p.returncode} {dt:.1f}min {status}{' ' + hint if hint else ''}\n", encoding="utf-8")
@@ -292,7 +296,7 @@ def _record_engine_state(engine_key: str, engine: dict, status: str, hint: str, 
 
 
 def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag: str = "",
-          reports_dir: str = "ops/reports", dry_run: bool = False) -> dict[str, Any]:
+          reports_dir: str | None = None, dry_run: bool = False) -> dict[str, Any]:
     """Launch `python -m jbr run <wp_id> <run_args...>` detached so it survives the caller's timeout."""
     root = pathlib.Path(project_root).resolve()
     paths = report_paths(root, wp_id, tag, reports_dir)
@@ -318,7 +322,7 @@ def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag:
     return {"pid": p.pid, "argv": argv, "marker": str(paths["done"])}
 
 
-def read_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str = "ops/reports") -> dict | None:
+def read_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None) -> dict | None:
     """Parse a .done marker: {"exit": int, "minutes": float} or None if still running.
     Markers carrying a status token add {"status": "OK|QUOTA|CRASH", "reset_hint": str}."""
     marker = report_paths(project_root, wp_id, tag, reports_dir)["done"]
@@ -337,7 +341,7 @@ def read_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", report
 
 
 def wait(project_root: str | os.PathLike, wp_ids: list[str], tag: str = "", timeout_s: float = 70 * 60,
-         poll_s: float = 30, reports_dir: str = "ops/reports", sleep=time.sleep) -> dict[str, dict | None]:
+         poll_s: float = 30, reports_dir: str | None = None, sleep=time.sleep) -> dict[str, dict | None]:
     """Block until every marker exists or timeout; returns {wp: done-dict|None}."""
     t0 = time.time()
     while True:
@@ -359,10 +363,10 @@ def split_stem(stem: str, known_ids: list[str] | None = None) -> tuple[str, str]
     return wp, tag
 
 
-def status(project_root: str | os.PathLike, reports_dir: str = "ops/reports",
+def status(project_root: str | os.PathLike, reports_dir: str | None = None,
            known_ids: list[str] | None = None) -> list[dict]:
     """One row per run-* prompt file: wp, tag, done marker, log size."""
-    rep = pathlib.Path(project_root) / reports_dir
+    rep = paths.reports_dir(project_root, reports_dir)
     rows = []
     for prompt in sorted(rep.glob(f"{RUN_PREFIX}-*.prompt.md")) if rep.exists() else []:
         stem = prompt.name[: -len(".prompt.md")][len(RUN_PREFIX) + 1:]
@@ -377,13 +381,13 @@ def status(project_root: str | os.PathLike, reports_dir: str = "ops/reports",
 
 
 def compose_fix(project_root: str | os.PathLike, review_output: str | os.PathLike, round_no: int,
-                reports_dir: str = "ops/reports") -> list[dict]:
+                reports_dir: str | None = None) -> list[dict]:
     """Turn review-workflow output into per-package fix instructions.
 
-    Writes ops/reports/review-<WP>-round<N>.json for every package and fix-<WP>-round<N>.md
+    Writes <reports>/review-<WP>-round<N>.json for every package and fix-<WP>-round<N>.md
     for packages with verdict 'fix'. Returns [{"wp", "verdict", "confirmed", "low", "fix_file"}].
     """
-    rep = pathlib.Path(project_root) / reports_dir
+    rep = paths.reports_dir(project_root, reports_dir)
     rep.mkdir(parents=True, exist_ok=True)
     out = json.loads(pathlib.Path(review_output).read_text(encoding="utf-8"))
     results = out["result"] if isinstance(out, dict) and "result" in out else out
