@@ -222,3 +222,21 @@ def test_engine_subprocess_never_inherits_stdin(tmp_path, monkeypatch):
     (tmp_path / "ops" / "work_packages.json").write_text(json.dumps({"work_packages": [{"id": "WP01", "title": "t"}]}))
     runner.run(tmp_path, "WP01", "ollama_qwen", ENGINES, tmp_path / "ops" / "work_packages.json")
     assert seen["stdin"] is subprocess.DEVNULL
+
+
+def test_worktree_is_recorded_before_the_engine_runs(repo):
+    """A worker killed during the engine run must leave the worktree findable, not orphaned."""
+    root, plan = repo
+    queue.add(root, ["WP01"], packages=str(plan / "work_packages.json"), prompts=str(plan / "prompts"))
+    seen = {}
+
+    def engine(project_root, wp, *a, **k):
+        seen["queued"] = queue.load(root)[0]                              # what a crash right now would leave
+        raise KeyboardInterrupt                                            # worker killed mid-run
+    with pytest.raises(KeyboardInterrupt):
+        queue.run_one(root, ENGINES, probe=lambda *a, **k: _Probe(), run_engine=engine)
+    assert seen["queued"]["status"] == "running" and seen["queued"]["worktree"].endswith(seen["queued"]["branch"].rsplit("/", 1)[1])
+    calls = []
+    done = queue.work(root, ENGINES, probe=lambda *a, **k: _Probe(), run_engine=_engine(calls), log=lambda m: None)
+    assert done[0]["worktree"] == seen["queued"]["worktree"]              # re-queued AND reused
+    assert len(_git(root, "worktree", "list").splitlines()) == 2          # main + one, no orphan

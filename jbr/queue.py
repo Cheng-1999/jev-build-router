@@ -205,6 +205,9 @@ def run_one(project: str | os.PathLike, engines: dict[str, dict], *, links: tupl
     try:
         if not it.get("worktree") or not pathlib.Path(it["worktree"]).exists():
             it["worktree"], it["branch"] = _make_worktree(root, it, links)
+            # saved now, not at the end: a worker killed mid-run must not orphan the worktree
+            _update(root, lambda items: next(i for i in items if i["wp"] == it["wp"] and i["status"] == RUNNING)
+                    .update(worktree=it["worktree"], branch=it["branch"]))
         tag = f"q{it.get('round', 0)}"
         extra = pathlib.Path(it["extra_file"]).read_text(encoding="utf-8") if it.get("extra_file") else ""
         res = (run_engine or runner.run)(it["worktree"], it["wp"], it["engine"], engines, it["packages"],
