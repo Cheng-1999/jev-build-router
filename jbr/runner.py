@@ -257,7 +257,9 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
         with open(paths["log"], "w", encoding="utf-8") as fh:
             fh.write(f"# {engine_key} run {wp_id} model={engine.get('model')} effort={engine.get('effort')}\n\n")
             fh.flush()
-            p = subprocess.run(cmd, cwd=root, stdout=fh, stderr=subprocess.STDOUT, env=_env())
+            # stdin closed: `codex exec` reads stdin when it is not a TTY and would wait forever on an
+            # inherited pipe (2026-10-10, a foreground `jbr queue work`)
+            p = subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, env=_env())
         dt = (time.time() - t0) / 60
         status, hint = classify_run(p.returncode, dt, paths["log"].read_text(encoding="utf-8", errors="replace"))
         paths["done"].write_text(f"{p.returncode} {dt:.1f}min {status}{' ' + hint if hint else ''}\n", encoding="utf-8")

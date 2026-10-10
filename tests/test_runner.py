@@ -93,7 +93,7 @@ def test_run_executes_and_writes_done_marker(project, engines, monkeypatch):
     class P:
         returncode = 3
 
-    def fake_run(cmd, cwd, stdout, stderr, env):
+    def fake_run(cmd, cwd, stdout, stderr, env, stdin=None):
         calls["cmd"] = cmd
         stdout.write("engine transcript\n")
         return P()

@@ -52,7 +52,7 @@ def _fake_engine(monkeypatch, text, returncode):
     class P:
         pass
 
-    def fake_run(cmd, cwd, stdout, stderr, env):
+    def fake_run(cmd, cwd, stdout, stderr, env, stdin=None):
         stdout.write(text)
         p = P()
         p.returncode = returncode

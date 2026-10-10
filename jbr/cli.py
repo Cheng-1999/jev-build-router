@@ -97,6 +97,29 @@ def _parser() -> argparse.ArgumentParser:
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--project-only", action="store_true", help="only this project's entries")
 
+    q = sub.add_parser("queue", help="backlog worked off by one engine (local Qwen by default), one package at a time, in worktrees")
+    qs = q.add_subparsers(dest="qcmd", required=True)
+    qa = qs.add_parser("add", help="queue packages from the plan (--packages/--prompts) for unattended work")
+    qa.add_argument("wp_ids", nargs="+")
+    qa.add_argument("--engine", default="ollama_qwen")
+    qa.add_argument("--base", default="HEAD", help="git ref the worktree branches from (default HEAD of the project)")
+    qa.add_argument("--test-cmd", default="", help="run in the worktree after the engine (default: the package's `tests`)")
+    qw = qs.add_parser("work", help="drain the queue (one package at a time; stops when the engine is not usable)")
+    qw.add_argument("--max", type=int, default=0, help="stop after N packages")
+    qw.add_argument("--detach", action="store_true", help="run in the background; log in the runs dir's worker.log")
+    qw.add_argument("--test-timeout-min", type=float, default=60)
+    qs.add_parser("status", help="every queued package: status, round, minutes, test exit, worktree")
+    qf = qs.add_parser("fix", help="put a finished package back with a reviewer's fix file (same worktree)")
+    qf.add_argument("wp_id")
+    qf.add_argument("fix_file")
+    qd = qs.add_parser("drop", help="remove a pending package")
+    qd.add_argument("wp_id")
+    qr = qs.add_parser("review-args", help="Workflow args for review_level.js, one object per finished package")
+    qr.add_argument("wp_ids", nargs="*", help="default: every done package")
+    qc = qs.add_parser("clean", help="remove a finished package's worktree and branch")
+    qc.add_argument("wp_id")
+    qc.add_argument("--force", action="store_true", help="even with unmerged engine work in it")
+
     sub.add_parser("paths", help="print where jbr keeps this project's files (pass reportsDir to the Workflow scripts)")
 
     pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
@@ -228,7 +251,7 @@ def cmd_pick(a) -> int:
 
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
 # sub-options that take one value: the token after them is a VALUE, never a global option
-VALUE_OPTS = {"--reason", "--build", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
+VALUE_OPTS = {"--reason", "--build", "--base", "--test-cmd", "--max", "--test-timeout-min", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
               "--model", "--timeout-min", "--poll", "--exclude"}
 
 
@@ -237,7 +260,7 @@ def _hoist_globals(argv: list[str]) -> list[str]:
     if not argv:
         return argv
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
-                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths"}), None)
+                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths", "queue"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
@@ -376,6 +399,48 @@ def cmd_scorecard(a) -> int:
     return 0
 
 
+def cmd_queue(a) -> int:
+    from jbr import queue
+    project = pathlib.Path(a.project).resolve()
+    try:
+        if a.qcmd == "add":
+            engines = _engines(a)
+            if a.engine not in engines:
+                print(f"unknown engine {a.engine!r}; known: {sorted(engines)}", file=sys.stderr)
+                return 2
+            added = queue.add(project, a.wp_ids, packages=a.packages, prompts=a.prompts, engine=a.engine,
+                              base=a.base, test_cmd=a.test_cmd)
+            skipped = sorted(set(a.wp_ids) - {i["wp"] for i in added})
+            print(f"queued {[i['wp'] for i in added]} on {a.engine} from {a.base}"
+                  + (f"; already queued: {skipped}" if skipped else ""))
+        elif a.qcmd == "work":
+            if a.detach:
+                glob = ["--engines", str(pathlib.Path(a.engines).resolve())] + [x for ov in a.available for x in ("--available", ov)]
+                work = (["--max", str(a.max)] if a.max else []) + ["--test-timeout-min", str(a.test_timeout_min)]
+                r = queue.spawn_worker(project, glob, work)
+                print(f"worker pid={r['pid']} log={r['log']}")
+            else:
+                queue.work(project, _engines(a), max_items=a.max, test_timeout_s=int(a.test_timeout_min * 60),
+                           log=lambda m: print(m, flush=True))
+        elif a.qcmd == "status":
+            print(queue.format_status(queue.load(project)))
+        elif a.qcmd == "fix":
+            it = queue.fix(project, a.wp_id, a.fix_file)
+            print(f"{it['wp']}: back in the queue, round {it['round']}, worktree {it['worktree']}")
+        elif a.qcmd == "drop":
+            print(f"dropped {queue.drop(project, a.wp_id)['wp']}")
+        elif a.qcmd == "review-args":
+            items = [i for i in queue.load(project) if i["status"] == queue.DONE and (not a.wp_ids or i["wp"] in a.wp_ids)]
+            print(json.dumps([queue.review_args(project, i) for i in items], indent=2, ensure_ascii=False))
+        elif a.qcmd == "clean":
+            it = queue.clean(project, a.wp_id, force=a.force)
+            print(f"removed {it['wp']}: worktree {it.get('worktree') or '-'}, branch {it.get('branch') or '-'}")
+    except (ValueError, RuntimeError) as e:
+        print(f"[jbr queue] {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def cmd_paths(a) -> int:
     project = pathlib.Path(a.project).resolve()
     from jbr import ledger
@@ -391,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
     a = _parser().parse_args(argv)
     return {"route": cmd_route, "run": cmd_run, "spawn": cmd_spawn, "wait": cmd_wait,
             "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick,
-            "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths}[a.cmd](a)
+            "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths, "queue": cmd_queue}[a.cmd](a)
 
 
 if __name__ == "__main__":

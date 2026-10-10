@@ -90,19 +90,46 @@ Every `ops/prompts/<WP>.md` (or the plan's `--prompts` dir) must have, before yo
 ## Steps
 
 1. **Check the engines.** `PYTHONPATH="$JBR" python -m jbr probe <engine>` for each. Force one off for a call with `--available codex_astra=no`; do not edit `engines.json` for a one-off. A probe failure whose detail is a model list means agy/codex renamed the model: run `agy models` and fix `engines.json`.
-2. **Assign.** `PYTHONPATH="$JBR" python -m jbr --project . [--packages ...] assign WP01=agy_gemini_pro WP02=codex_astra --reason "WP02=billing path, non-Claude family for review" [--second-opinion]`. Probes live, refuses unknown/exhausted engines, writes `ops/routing.json` (`model: "commander"`, per package `engine`, `reason`, `chain` = your pick then the other usable engines by priority, ending in `claude_subagent`; `second_opinion` when asked). **Show the user the table with your reasons before building.** (`jbr route` still exists: the decision model routes everything itself. Use it only when the user asks for it.)
+2. **Assign.** `PYTHONPATH="$JBR" python -m jbr --project . [--packages ...] assign WP01=agy_gemini_pro WP02=codex_astra --reason "WP02=billing path, non-Claude family for review" [--second-opinion]`. Probes live, refuses unknown/exhausted engines, writes `routing.json` in the runs dir (`model: "commander"`, per package `engine`, `reason`, `chain` = your pick then the other usable engines by priority, ending in `claude_subagent`; `second_opinion` when asked). **Show the user the table with your reasons before building.** (`jbr route` still exists: the decision model routes everything itself. Use it only when the user asks for it.)
 3. **Build with the DAG workflow.** Call the Claude Code Workflow tool with `scriptPath = C:\Users\a8878\dev\jev-build-router\workflows\build_dag.js` and
    ```
    args = { root: "<project root>", jbr: "/c/Users/a8878/dev/jev-build-router",
+            reportsDir: "<jbr paths .reports_dir>",  // REQUIRED with external engines; jbr writes nothing into the project
             packages: [{id, depends_on}, ...],       // from work_packages.json
             done: [...],                              // already accepted packages
-            routing: <ops/routing.json .chains>,      // per package: [chain] | "engine" (pin) | "auto"; omit -> auto
+            routing: <routing.json .chains>,          // `jbr paths` .routing; per package: [chain] | "engine" (pin) | "auto"
+            promptsDir: "<plan prompts dir>",         // absolute is fine (plans may live outside the repo)
             maxFixRounds: 2, testCmd: "python -m pytest -q" }
    ```
-   Routing values: a list is the package's chain; a string pins that engine first and falls back along `engineChain` after it; `"auto"` or no entry walks the whole `engineChain` (default `['agy_gemini_pro','agy_claude_opus','codex_astra','claude_subagent']`). For each external engine the low-effort runner agent first runs `jbr probe`; EXHAUSTED/UNAVAILABLE -> reported as `quota` without spawning and the step moves to the next engine. There is no run-wide skip list: every step probes again, so a recovered engine is used again later in the same run. Quota/crash runs are never reviewed and never consume a fix round; review/verify/fix stay Claude subagents. Without `jbr`, auto chains reduce to `claude_subagent`.
-4. **Review an already-built level separately** (e.g. packages built outside the workflow): Workflow tool with `scriptPath = ...\workflows\review_level.js`, `args = { root, ids: ["WP01", "WP02"] }`. Save the workflow output to a json file, then `PYTHONPATH="$JBR" python -m jbr compose-fix <output.json> <round>` writes `ops/reports/fix-<WP>-round<N>.md`; re-run on `$(python -m jbr pick)` with `PYTHONPATH="$JBR" python -m jbr spawn WP --engine <engine> --tag fix1 --extra-file ops/reports/fix-WP-round1.md`.
+   Routing values: a list is the package's chain; a string pins that engine first and falls back along `engineChain` after it; `"auto"` or no entry walks the whole `engineChain` (default `['agy_gemini_pro','agy_claude_opus','codex_astra','ollama_qwen','claude_subagent']`). For each external engine the low-effort runner agent first runs `jbr probe`; EXHAUSTED/UNAVAILABLE -> reported as `quota` without spawning and the step moves to the next engine. There is no run-wide skip list: every step probes again, so a recovered engine is used again later in the same run. Quota/crash runs are never reviewed and never consume a fix round; review/verify/fix stay Claude subagents. Without `jbr`, auto chains reduce to `claude_subagent`.
+4. **Review an already-built level separately** (e.g. packages built outside the workflow): Workflow tool with `scriptPath = ...\workflows\review_level.js`, `args = { root, ids: ["WP01", "WP02"], reportsDir: <jbr paths .reports_dir> }`. Save the workflow output to a json file, then `PYTHONPATH="$JBR" python -m jbr compose-fix <output.json> <round>` writes `<reports_dir>/fix-<WP>-round<N>.md`; re-run on `$(python -m jbr pick)` with `PYTHONPATH="$JBR" python -m jbr spawn WP --engine <engine> --tag fix1 --extra-file <reports_dir>/fix-WP-round1.md`.
 5. **Record.** After every build, save the Workflow's returned list (the per-package `[{wp, engine, final, history, low_open, ...}]`) to a JSON file and run `PYTHONPATH="$JBR" python -m jbr [--packages ...] record <result.json> --build <name>`. It appends one ledger line per package (implementer = the engine whose run succeeded, fix rounds, confirmed defects, quota hits, minutes from the run markers). Packages finished outside the workflow and never reviewed are not recorded: they would skew the scorecard.
 6. **Monitor.** `PYTHONPATH="$JBR" python -m jbr status` (routing + `.done` markers), `PYTHONPATH="$JBR" python -m jbr wait WP05 WP06 --timeout-min 70` (exit 124 while a marker is still missing), `cat ~/.jbr/engine_state.json` (who is exhausted until when). Every `python -m jbr` call needs `PYTHONPATH="$JBR"` unless `pip install -e` was run.
+
+## Qwen backlog lane (user rule, 2026-10-10): non-urgent or easy work, unattended
+
+Local Qwen is free but slow, and this Mac serves one Ollama request at a time (two concurrent jobs: 72 s,
+the same as back to back), so the "swarm" is a backlog worked off one package at a time, overnight or
+while the user works on other things. Put a package in the lane when it is **not urgent** or **easy**
+(small, fully specified, clear acceptance, no billing/security/legal surface). Urgent or risky work stays
+in the normal build.
+
+```
+PYTHONPATH="$JBR" python -m jbr --project <root> --packages <plan>/work_packages.json --prompts <plan>/prompts \
+    queue add WP07 WP08 [--base origin/main] [--test-cmd "..."]    # default test cmd: the package's `tests`
+PYTHONPATH="$JBR" python -m jbr --project <root> queue work --detach                 # one worker; log in the runs dir
+PYTHONPATH="$JBR" python -m jbr --project <root> queue status
+```
+
+- Each package runs in its own git worktree under the runs dir, on branch `jbr/ollama_qwen/<WP>-<stamp>`
+  from the pinned base; `.venv`/`node_modules` are symlinked in. The worker never commits or pushes, and
+  stops (leaving the rest pending) when Qwen's probe fails. One worker per project (pid lock).
+- **Review in a batch** when the user is back: `queue review-args` prints one `review_level.js` args object per
+  finished package (root = its worktree, `logTag` = its run). Run the review per package. Accept: commit in
+  the worktree, push the branch, open a PR, merge as usual, then `queue clean WP` (refuses uncommitted or
+  unmerged work unless `--force`). Fix: `compose-fix` the review output, then `queue fix WP <fix file>` puts it
+  back in the queue in the same worktree.
+- After each batch, `record` the reviewed results like a build so the scorecard shows what Qwen handles well.
 
 ## Known engine pitfalls (see README "Known pitfalls")
 
@@ -114,5 +141,6 @@ Every `ops/prompts/<WP>.md` (or the plan's `--prompts` dir) must have, before yo
 
 ## Do not
 
-- Do not edit the target project's files from this skill; only `ops/routing.json` and `ops/reports/*` are written (plus the engine state file under `~/.jbr`).
+- Do not edit the target project's files from this skill. jbr writes only under `~/.jbr` (`jbr paths`: runs dir with reports, routing.json, queue and worktrees; ledger; engine state), never into the project tree.
+- Do not put build-router material (plans, prompts, routing records) in the project's main branch: keep plans outside the repo or in jev-build-router `examples/` (user rule, 2026-10-10).
 - Do not call the TypeSafe API when the user only wants to see the plan: use `route --dry-run`.

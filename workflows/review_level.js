@@ -10,6 +10,7 @@
 //   promptsDir: 'ops/prompts',          // absolute, or relative to root
 //   reportsDir: '<jbr paths .reports_dir>',  // where the engine transcripts are (optional: without it reviewers skip them)
 //   testCmd: 'python -m pytest -q',
+//   logTag: 'q0',                       // optional: engine transcript is <reportsDir>/<logPrefix>-<id>-<logTag>.log
 //   logPrefix: 'run',                   // engine transcript is <reportsDir>/<logPrefix>-<id>.log
 //   engineStatus: { WP02: 'quota' }     // optional, from `jbr wait`/`jbr status` (OK|QUOTA|CRASH): a package whose
 //                                       // last engine run did no work is NOT reviewed (verdict 'blocked')
@@ -39,6 +40,7 @@ const PROMPTS = A.promptsDir || 'ops/prompts'
 const REPORTS = A.reportsDir || ''
 const TEST_CMD = A.testCmd || 'python -m pytest -q'
 const LOG_PREFIX = A.logPrefix || 'run'
+const LOG_TAG = A.logTag ? '-' + A.logTag : ''   // queue runs are tagged: run-<WP>-q<round>.log
 const ENGINE_STATUS = A.engineStatus || {}
 const deadRun = id => ['quota', 'crash'].includes(String(ENGINE_STATUS[id] || 'ok').toLowerCase())
 
@@ -63,7 +65,7 @@ const VERDICT_SCHEMA = { type: 'object', properties: {
 
 const reviewPrompt = id => `Adversarial fresh-context review of work package ${id} in the repo ${ROOT}. You did not write this code; do not infer the author's intent, judge only what is on disk.
 1. Read ${under(PROMPTS, id + '.md')} fully: it holds the goal, owned files and the acceptance criteria.
-2. ${REPORTS ? `Read ${under(REPORTS, LOG_PREFIX + '-' + id + '.log')} if it exists (the engineer's transcript; treat its claims as unverified).` : 'No engine transcript was provided; judge the code and tests only.'}
+2. ${REPORTS ? `Read ${under(REPORTS, LOG_PREFIX + '-' + id + LOG_TAG + '.log')} if it exists (the engineer's transcript; treat its claims as unverified).` : 'No engine transcript was provided; judge the code and tests only.'}
 3. Run the tests from the repo root with Bash: cd ${POSIX} && ${TEST_CMD} 2>&1 | tail -20 . Record the summary line and total test count. If the package spec names specific test ids, run them explicitly too.
 4. Check EVERY acceptance criterion against the code and test output; cite file:line evidence for each pass and each failure. Verify field names, enum members, signatures and numeric tolerances literally as written in the criteria.
 5. Ownership: list any file the engineer modified that is not in the package's owned-file list (cd ${POSIX} && git status --short && git diff --stat) unless it is a pure export append.
