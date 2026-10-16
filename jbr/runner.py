@@ -24,7 +24,7 @@ import time
 import traceback
 from typing import Any
 
-from jbr import paths
+from jbr import models, paths
 
 RUN_PREFIX = "run"
 DEFAULT_TIMEOUT = "55m"
@@ -141,6 +141,7 @@ def pointer_text(prompt_file: pathlib.Path, project_root: pathlib.Path) -> str:
 def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib.Path,
                   last_file: pathlib.Path, timeout: str = DEFAULT_TIMEOUT) -> list[str] | None:
     """argv for the engine's CLI, or None when the engine is a Claude Code subagent."""
+    engine = models.resolve(engine)  # "auto:<family>" -> the best id agy lists now
     runner = engine.get("runner", "agy")
     model = engine.get("model", "")
     effort = engine.get("effort", "high")

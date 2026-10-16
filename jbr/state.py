@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Callable, Iterator
 
-from jbr import runner
+from jbr import models, runner
 from jbr.router import by_priority
 
 AVAILABLE, EXHAUSTED, UNAVAILABLE, UNKNOWN = "AVAILABLE", "EXHAUSTED", "UNAVAILABLE", "UNKNOWN"
@@ -156,7 +156,8 @@ def state_path() -> pathlib.Path:
 def bucket_of(engine_key: str, engine: dict | None) -> str:
     """Quota bucket: all agy engines on a Claude model share one."""
     e = engine or {}
-    if e.get("runner") == "agy" and str(e.get("model", "")).lower().startswith("claude"):
+    model = str(e.get("model", "")).lower().removeprefix(models.AUTO)  # "auto:claude-opus" is still Claude
+    if e.get("runner") == "agy" and model.startswith("claude"):
         return CLAUDE_BUCKET
     return engine_key
 
@@ -312,6 +313,8 @@ def _bin(name: str) -> str:
 
 def probe_command(engine: dict) -> list[str] | None:
     """The cheap live-probe argv for an engine; None for claude_subagent."""
+    if engine.get("runner", "agy") == "agy":
+        engine = models.resolve(engine, agy_bin=_bin("agy"))  # "auto:<family>" -> the best id agy lists now
     r, model = engine.get("runner", "agy"), engine.get("model", "")
     if r == "claude_subagent":
         return None

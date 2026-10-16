@@ -3,7 +3,12 @@ import pathlib
 
 import pytest
 
+from jbr import models
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
+
+# What "auto:gemini" / "auto:claude-opus" resolve to in tests (the ids the chain tests were written against).
+FIXED_AGY_MODELS = ["gemini-3.1-pro-high", "gemini-3.1-pro-low", "claude-opus-5-5-high", "claude-sonnet-5-5-high"]
 
 PACKAGES = {
     "rules": "Rules: Python 3.12, src layout under src/demo, pytest.",  # prefix only; runner.DEFAULT_RULES is always appended
@@ -39,6 +44,12 @@ def isolated_engine_state(tmp_path, monkeypatch):
     # ...and its own runs dir and ledger: no test writes run artifacts or ledger lines under the real ~/.jbr
     monkeypatch.setenv("JBR_RUNS", str(tmp_path / "jbr-runs"))
     monkeypatch.setenv("JBR_LEDGER", str(tmp_path / "jbr-ledger.jsonl"))
+    # "auto:<family>" engines resolve against this fixed `agy models` list, never the real agy CLI.
+    # A test that passes its own `run=` (or patches list_agy_models itself) gets the real lister.
+    real = models.list_agy_models
+    monkeypatch.setattr(
+        models, "list_agy_models", lambda **kw: real(**kw) if "run" in kw else list(FIXED_AGY_MODELS)
+    )
     return path
 
 
