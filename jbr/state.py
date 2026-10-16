@@ -313,8 +313,7 @@ def _bin(name: str) -> str:
 
 def probe_command(engine: dict) -> list[str] | None:
     """The cheap live-probe argv for an engine; None for claude_subagent."""
-    if engine.get("runner", "agy") == "agy":
-        engine = models.resolve(engine, agy_bin=_bin("agy"))  # "auto:<family>" -> the best id agy lists now
+    engine = models.resolve(engine, agy_bin=_bin("agy"))  # "auto:<family>" -> the best id agy lists now
     r, model = engine.get("runner", "agy"), engine.get("model", "")
     if r == "claude_subagent":
         return None
@@ -380,15 +379,17 @@ def probe(engine_key: str, engines: dict[str, dict], *, live: bool = True, now: 
         hit = _from_record(engine_key, load(p).get(bucket, {}), now or clock())  # someone probed while we waited
         if hit:
             return hit
-        cmd = probe_command(eng)
         try:
+            cmd = probe_command(eng)  # may list agy models (auto:<family>); failures -> UNAVAILABLE below
             proc = run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=PROBE_TIMEOUT_S, stdin=subprocess.DEVNULL, cwd=str(p.parent) if p.parent.exists() else None)
             rc, out = proc.returncode, (proc.stdout or "") + "\n" + (proc.stderr or "")
         except subprocess.TimeoutExpired as e:
             rc, out = None, ((e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or ""))
         except OSError as e:  # binary missing / not executable
-            rc, out = 127, f"cannot run {cmd[0]}: {e}"
+            rc, out = 127, f"cannot run {eng.get('runner', 'agy')}: {e}"
+        except (LookupError, ValueError) as e:  # auto: model unresolvable (agy lists none) / misconfigured
+            rc, out = 127, f"cannot resolve model {eng.get('model')!r}: {e}"
         status, info = classify_probe(rc, out)
         t = now or clock()
         if status == AVAILABLE:
