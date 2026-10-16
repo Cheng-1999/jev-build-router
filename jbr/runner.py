@@ -24,7 +24,7 @@ import time
 import traceback
 from typing import Any
 
-from jbr import paths
+from jbr import models, paths
 
 RUN_PREFIX = "run"
 DEFAULT_TIMEOUT = "55m"
@@ -140,7 +140,8 @@ def pointer_text(prompt_file: pathlib.Path, project_root: pathlib.Path) -> str:
 
 def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib.Path,
                   last_file: pathlib.Path, timeout: str = DEFAULT_TIMEOUT) -> list[str] | None:
-    """argv for the engine's CLI, or None when the engine is a Claude Code subagent."""
+    """argv for the engine's CLI, or None when the engine is a Claude Code subagent. Pure: an
+    `auto:<family>` model must be resolved first (run() does; models.resolve)."""
     runner = engine.get("runner", "agy")
     model = engine.get("model", "")
     effort = engine.get("effort", "high")
@@ -158,7 +159,7 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
         return cmd
     if runner == "agy":
         cmd = ["agy", "-p", pointer, "--model", model, "--dangerously-skip-permissions", "--print-timeout", timeout]
-        if not model.startswith("claude"):
+        if not model.removeprefix(models.AUTO).startswith("claude"):
             # agy rejects --effort for Claude thinking models (their thinking is the boost)
             cmd += ["--effort", effort]
         return cmd
@@ -238,7 +239,10 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
     try:
         if engine_key not in engines:
             raise KeyError(f"unknown engine {engine_key!r}; known: {sorted(engines)}")
-        engine = engines[engine_key]
+        from jbr import state  # lazy: state imports runner
+        # "auto:<family>" -> the best id agy lists now; a dry-run only reads the cache (stays offline)
+        engine = models.resolve(engines[engine_key], offline=dry_run, agy_bin=state._bin("agy"))
+        result["model"] = engine.get("model")
         packages, meta = load_packages(packages_path)
         wp = find_package(packages, wp_id)
         prompt = compose_prompt(root, wp, prompts_dir, extra, rules or meta.get("rules"))
@@ -255,7 +259,8 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
             return result
 
         with open(paths["log"], "w", encoding="utf-8") as fh:
-            fh.write(f"# {engine_key} run {wp_id} model={engine.get('model')} effort={engine.get('effort')}\n\n")
+            spec = f" ({engine['model_spec']})" if engine.get("model_spec") else ""
+            fh.write(f"# {engine_key} run {wp_id} model={engine.get('model')}{spec} effort={engine.get('effort')}\n\n")
             fh.flush()
             # stdin closed: `codex exec` reads stdin when it is not a TTY and would wait forever on an
             # inherited pipe (2026-10-10, a foreground `jbr queue work`)

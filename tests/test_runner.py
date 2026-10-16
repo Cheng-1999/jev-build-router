@@ -3,7 +3,7 @@ import pathlib
 
 import pytest
 
-from jbr import router, runner
+from jbr import models, router, runner
 from tests.conftest import reports
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -36,7 +36,7 @@ def test_compose_prompt_inlines_spec_rules_and_extra(project, packages):
 
 
 def test_build_command_agy_claude_omits_effort(tmp_path, engines):
-    cmd = runner.build_command(engines["agy_claude_opus"], tmp_path / "p.md", tmp_path, tmp_path / "last.md", "40m")
+    cmd = runner.build_command(models.resolve(engines["agy_claude_opus"]), tmp_path / "p.md", tmp_path, tmp_path / "last.md", "40m")
     assert cmd[:2] == ["agy", "-p"]
     assert str(tmp_path / "p.md") in cmd[2]  # file pointer, not the prompt body
     assert "--dangerously-skip-permissions" in cmd
@@ -46,7 +46,7 @@ def test_build_command_agy_claude_omits_effort(tmp_path, engines):
 
 
 def test_build_command_agy_gemini_adds_effort(tmp_path, engines):
-    cmd = runner.build_command(engines["agy_gemini_pro"], tmp_path / "p.md", tmp_path, tmp_path / "last.md")
+    cmd = runner.build_command(models.resolve(engines["agy_gemini_pro"]), tmp_path / "p.md", tmp_path, tmp_path / "last.md")
     assert cmd[cmd.index("--model") + 1] == "gemini-3.1-pro-high"
     assert cmd[cmd.index("--effort") + 1] == "high"
 
@@ -259,3 +259,25 @@ def test_shipped_ollama_engine_sits_before_claude_in_the_chain():
     assert router.by_priority(engines)[-2:] == ["ollama_qwen", "claude_subagent"]
     assert router.chain_for("codex_astra", engines) == ["codex_astra", "agy_gemini_pro", "agy_claude_opus",
                                                          "ollama_qwen", "claude_subagent"]
+
+
+def test_run_resolves_auto_models_offline_on_dry_run_and_logs_spec(project, engines, monkeypatch, tmp_path):
+    seen = []
+
+    def lister(**kw):
+        seen.append(kw)
+        return ["gemini-4-argon-high", "gemini-3.8-flash-high"]
+    monkeypatch.setattr(models, "list_agy_models", lister)
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no exec")))
+    res = runner.run(project, "WP01", "agy_gemini_pro", engines, project / "ops" / "work_packages.json",
+                     "ops/prompts", dry_run=True)
+    assert seen and seen[0]["offline"] is True  # a dry-run never lists agy models live
+    assert res["model"] == "gemini-4-argon-high" and res["cmd"][res["cmd"].index("--model") + 1] == "gemini-4-argon-high"
+
+    class Done:
+        returncode = 0
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: Done())
+    res = runner.run(project, "WP01", "agy_gemini_pro", engines, project / "ops" / "work_packages.json", "ops/prompts")
+    assert seen[-1]["offline"] is False
+    head = pathlib.Path(res["paths"]["log"]).read_text(encoding="utf-8").splitlines()[0]
+    assert "model=gemini-4-argon-high (auto:gemini)" in head  # the log says which model really ran

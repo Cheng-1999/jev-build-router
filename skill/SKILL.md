@@ -21,8 +21,8 @@ cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 
 agy is the base worker. Every implement/fix step prefers, in order:
 
-1. `agy_gemini_pro` (agy, gemini-3.1-pro-high)
-2. `agy_claude_opus` (agy, claude-opus-5-5-high; shares ONE Claude quota bucket with any other agy Claude model, e.g. Sonnet)
+1. `agy_gemini_pro` (agy, `auto:gemini`: newest Gemini that `agy models` lists, e.g. gemini-4-argon-high on 2026-10-16)
+2. `agy_claude_opus` (agy, `auto:claude-opus`, e.g. claude-opus-5-5-high; shares ONE Claude quota bucket with any other agy Claude model, e.g. Sonnet)
 3. `codex_astra` (codex, gpt-6-astra; flags `-s workspace-write`, there is no `--full-auto`)
 4. `ollama_qwen` (local Qwen 3.8 27B on Ollama, driven by codex `--oss --local-provider ollama`; free, never quota-limited)
 5. `claude_subagent` (Claude Code workflow subagent; last resort, never quota-probed)
@@ -89,7 +89,7 @@ Every `ops/prompts/<WP>.md` (or the plan's `--prompts` dir) must have, before yo
 
 ## Steps
 
-1. **Check the engines.** `PYTHONPATH="$JBR" python -m jbr probe <engine>` for each. Force one off for a call with `--available codex_astra=no`; do not edit `engines.json` for a one-off. A probe failure whose detail is a model list means agy/codex renamed the model: run `agy models` and fix `engines.json`.
+1. **Check the engines.** `PYTHONPATH="$JBR" python -m jbr probe <engine>` for each. Force one off for a call with `--available codex_astra=no`; do not edit `engines.json` for a one-off. agy engines use `auto:<family>` models (resolved per probe/run from `agy models`, cached 1 h; see README "agy model names"), so a retired agy id needs no edit. A probe failure "cannot resolve model" means agy lists nothing of that family (not logged in, or the family is gone): run `agy models`. A codex probe failure whose detail is a model list means codex renamed the model: fix `engines.json`.
 2. **Assign.** `PYTHONPATH="$JBR" python -m jbr --project . [--packages ...] assign WP01=agy_gemini_pro WP02=codex_astra --reason "WP02=billing path, non-Claude family for review" [--second-opinion]`. Probes live, refuses unknown/exhausted engines, writes `routing.json` in the runs dir (`model: "commander"`, per package `engine`, `reason`, `chain` = your pick then the other usable engines by priority, ending in `claude_subagent`; `second_opinion` when asked). **Show the user the table with your reasons before building.** (`jbr route` still exists: the decision model routes everything itself. Use it only when the user asks for it.)
 3. **Build with the DAG workflow.** Call the Claude Code Workflow tool with `scriptPath = C:\Users\a8878\dev\jev-build-router\workflows\build_dag.js` and
    ```
