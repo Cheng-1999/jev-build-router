@@ -159,7 +159,7 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
         return cmd
     if runner == "agy":
         cmd = ["agy", "-p", pointer, "--model", model, "--dangerously-skip-permissions", "--print-timeout", timeout]
-        if not model.startswith("claude"):
+        if not model.removeprefix(models.AUTO).startswith("claude"):
             # agy rejects --effort for Claude thinking models (their thinking is the boost)
             cmd += ["--effort", effort]
         return cmd

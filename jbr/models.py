@@ -19,6 +19,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import time
 from typing import Any, Callable
 
@@ -51,7 +52,8 @@ def _rank(model_id: str, family: str, effort: str | None) -> tuple:
     m = _VERSION_RE.match(rest)
     version = tuple(int(n) for n in re.split(r"[.-]", m.group(0))) if m else ()
     suffix = rest.rsplit("-", 1)[-1]
-    return version, int(effort is not None and suffix == effort), EFFORT_RANK.get(suffix, 0), model_id
+    # last: the shorter id (plain beats -lite/-preview variants), then the id itself for determinism
+    return version, int(effort is not None and suffix == effort), EFFORT_RANK.get(suffix, 0), -len(model_id), model_id
 
 
 def pick(models: list[str], family: str, effort: str | None = None) -> str | None:
@@ -112,7 +114,10 @@ def list_agy_models(*, run: Callable[..., Any] | None = None, path: pathlib.Path
     if ids:
         _write_cache(p, ids, now())
         return ids
+    if "exit 0" in detail:  # agy answered but nothing parsed: its output format changed
+        detail = f"exit 0 but no `<id>\\t<label>` lines parsed (format change?): {detail.removeprefix('exit 0: ')}"
     if cached:
+        sys.stderr.write(f"jbr: warning: agy models failed ({detail[:160]}); using the cached list\n")
         return list(cached[1])  # stale beats nothing
     raise LookupError(f"agy lists no models ({detail})")
 

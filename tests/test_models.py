@@ -143,3 +143,21 @@ def test_build_command_is_pure_and_probe_uses_resolved_id(tmp_path, monkeypatch)
     monkeypatch.setattr(models, "list_agy_models", lambda **kw: ids())
     probe = state.probe_command({"runner": "agy", "model": "auto:gemini"})
     assert probe[probe.index("--model") + 1] == "gemini-4-argon-high"
+
+
+def test_tie_prefers_plain_id_over_variants():
+    assert models.pick(["gemini-3.8-flash-lite-high", "gemini-3.8-flash-high"], "gemini") == "gemini-3.8-flash-high"
+    assert models.pick(["gemini-4-argon-preview-high", "gemini-4-argon-high"], "gemini") == "gemini-4-argon-high"
+
+
+def test_unparseable_exit_0_warns_and_uses_cache(tmp_path, capsys):
+    cache = tmp_path / "c.json"
+    models.list_agy_models(run=FakeRun(), path=cache, now=lambda: 0.0)
+    got = models.list_agy_models(run=FakeRun(stdout="gemini-4-argon-high Gemini 4 Argon\n"), path=cache, now=lambda: 1e9)
+    assert got[0] == "gemini-4-argon-high" and "format change" in capsys.readouterr().err
+
+
+def test_unresolved_auto_claude_never_gets_effort(tmp_path):
+    cmd = runner.build_command({"runner": "agy", "model": "auto:claude-opus", "effort": "high"},
+                               tmp_path / "p.md", tmp_path, tmp_path / "last.md")
+    assert "--effort" not in cmd  # cold-cache dry-run argv stays truthful
