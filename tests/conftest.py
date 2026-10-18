@@ -44,6 +44,9 @@ def isolated_engine_state(tmp_path, monkeypatch):
     # ...and its own runs dir and ledger: no test writes run artifacts or ledger lines under the real ~/.jbr
     monkeypatch.setenv("JBR_RUNS", str(tmp_path / "jbr-runs"))
     monkeypatch.setenv("JBR_LEDGER", str(tmp_path / "jbr-ledger.jsonl"))
+    # ...and prereview's ocr home derives from JBR_RUNS; a developer's own overrides never leak in
+    monkeypatch.delenv("JBR_OCR_HOME", raising=False)
+    monkeypatch.delenv("JBR_OCR_BIN", raising=False)
     # "auto:<family>" engines resolve against this fixed `agy models` list, never the real agy CLI.
     # A test that passes its own `run=` (or patches list_agy_models itself) gets the real lister.
     real = models.list_agy_models

@@ -7,13 +7,14 @@ Pure Python 3.12 standard library. No dependencies (pytest only for tests).
 ```
 jev-build-router/
   engines.json              default engine table (descriptions are what Jev reads)
-  jbr/                      python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick
+  jbr/                      python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview
     router.py               routing.json: commander `assign` or decision-model `route` (engine + fallback chain)
     paths.py                where jbr keeps files: ~/.jbr/runs/<project key>/ (never inside the project)
     queue.py                backlog lane: one engine (local Qwen), one package at a time, in git worktrees
     ledger.py               engine ledger + scorecard
     runner.py               prompt composition, agy/codex commands, spawn, .done markers, compose-fix
     state.py                engine availability: state file, reset-hint parsing, live probe, pick
+    prereview.py            cheap first-pass review: open-code-review on local Ollama, before the Claude review
     cli.py
   workflows/
     build_dag.js            Claude Code Workflow: DAG build (implement -> review -> refute -> fix)
@@ -118,6 +119,7 @@ Nothing is written into the project. Per project (key = its absolute path with s
 ~/.jbr/runs/<key>/queue.json     the backlog lane, plus worker.lock, worker.log and worktrees/
 ~/.jbr/ledger.jsonl              engine ledger (all projects)
 ~/.jbr/engine_state.json         quota / availability state
+~/.jbr/ocr-home/                 prereview's private HOME for ocr (config with the local provider only, ocr sessions)
 ```
 
 `python -m jbr --project <root> paths` prints them; pass `.reports_dir` to the Workflow scripts as `reportsDir`.
@@ -140,6 +142,61 @@ PYTHONPATH="$JBR" python -m jbr --project . queue clean WP07         # after mer
 Each package gets a worktree on `jbr/<engine>/<WP>-<stamp>` from a pinned base, with `.venv`/`node_modules`
 symlinked in; the worker runs the engine, then the package's test command, records changed files and the
 test tail, and moves on. It never commits, pushes or reviews, and stops when the engine's probe fails.
+
+## Pre-review: open-code-review on local Qwen (opt-in, since 2026-10-18)
+
+[alibaba/open-code-review](https://github.com/alibaba/open-code-review) (`ocr`, Apache-2.0) turns a git diff into
+line-level comments: deterministic file selection, bundling, rule matching and comment positioning around LLM
+sub-agents. `jbr prereview` runs it against the local Ollama model before a Claude review, and the Claude
+reviewer gets its findings as unverified hints. Design, spike numbers and the recommendation:
+[docs/OPEN_CODE_REVIEW_PROPOSAL.md](docs/OPEN_CODE_REVIEW_PROPOSAL.md).
+
+```bash
+npm i -g @alibaba-group/open-code-review          # or a release binary; JBR_OCR_BIN=<path> points jbr at it
+PYTHONPATH="$JBR" python -m jbr prereview WP05 --dry-run         # scope + argv, runs nothing
+PYTHONPATH="$JBR" python -m jbr prereview WP05 --tag r1 [--detach] [--commit <sha>] [--effort low|medium|high] \
+    [--budget-min 45] [--url http://127.0.0.1:11434/v1] [--model <id>] [--backend-engine ollama_qwen] [--no-spec]
+```
+
+- **Scope**: the package's owned files (`files` globs in work_packages.json) among the changed files of the
+  workspace (`git diff HEAD` + untracked) or of `--commit`. Every other changed file goes to `--exclude` as a
+  full repo-relative path, or as `dir/**` for its shallowest directory without an owned change, because
+  `build_dag.js` builds packages side by side in one checkout. ocr matches each pattern against the whole path;
+  this was checked with `--preview` against v1.13.1. A package without `files` is SKIPPED in
+  workspace mode. `ops/prompts/<WP>.md` (`--prompts`) is passed as `--background-file` (`--no-spec` turns
+  that off). ocr skips test files by default.
+- **Local only**: the default endpoint is `http://127.0.0.1:11434/v1`, and the default model is `ollama_qwen`'s
+  (that engine disabled = SKIPPED). A non-loopback `--url` is refused unless `--allow-remote` is given, and with
+  it more than the diff leaves the machine: ocr's agent reads files of the repo. ocr runs with `HOME` set to
+  jbr's own ocr home (`~/.jbr/ocr-home`, override `JBR_OCR_HOME`). That home holds only the `jbr-local`
+  provider, and its sessions dir is cleared before each run. The environment is an allow-list: no
+  `ANTHROPIC_*` / `OPENAI_*` / `OCR_LLM_*` from your shell, which ocr would otherwise pick up. Your global git
+  ignore file and `safe.directory` are passed through `GIT_CONFIG_*`, plus `OCR_NO_UPDATE=1`.
+- **Never fails a build**: always exits 0. `prereview-<WP>[-tag].done` reads `<exit> <minutes>min <STATUS>`
+  (exit -1: no ocr exit code, because it never ran or was killed). STATUS values:
+  - `OK`
+  - `SKIPPED`: no ocr; backend not ready, from one GET of `<url>/models` that records nothing in the engine
+    state; nothing owned changed; non-local URL; or `busy`, meaning another prereview held the machine-wide lock
+    for 5 min (Ollama serves one request at a time).
+  - `FAILED`
+  - `TIMEOUT`: past `--budget-min`, default 45. ocr first gets SIGTERM and publishes a partial result, which is
+    used as `OK` if it has findings; 30 s later the process tree is killed.
+
+  Findings: `prereview-<WP>[-tag].json`; ocr's own output in `.raw.json`, its log in `.log`.
+- **Workflows**: pass `preReview: true | {effort, budgetMin}` to `build_dag.js` (which also takes `rounds:
+  'first'|'all'`, default `first`) and to `review_level.js`. Both need `jbr` and `reportsDir`. `jbrArgs` must
+  carry `--packages <plan>/work_packages.json` when the plan is not at `ops/work_packages.json`; spawn already
+  needs it there. A low-effort agent runs `jbr prereview --detach` and polls the marker.
+  - With status `ok` and at least one finding, the reviewer prompt gets a step 0: check each finding at the cited
+    lines, report real ones (on owned files) as failures whose criterion starts with `pre-review: `, then spend
+    the effort on what ocr does not cover (acceptance criteria, tests, ownership, mutation check).
+  - Those failures are refuted like any other and reach compose-fix unchanged.
+  - Any other outcome means the plain review runs, with an identical prompt.
+  - Review history rows get `prereview: {status, findings, confirmed}`. Default off.
+- **Cost**: wall-clock only, no cloud tokens. The Claude review of a package waits for its prereview. Because
+  prereviews run one at a time, packages that reach review together are delayed. After 5 min of waiting a
+  package proceeds without hints (`busy`). The prereview shares Ollama with an `ollama_qwen` implementer run,
+  and each slows the other.
 
 ## engines.json
 
@@ -215,7 +272,8 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
   testCmd: "python -m pytest -q",
   promptsDir: "ops/prompts", reportsDir: "<jbr paths .reports_dir>",   // reportsDir required with external engines
   sourceHint: "src layout under src/pkg",  // optional one-liner in the engineer rules
-  rules: "..."                              // optional: replace the COMMON rules text entirely
+  rules: "...",                             // optional: replace the COMMON rules text entirely
+  preReview: false                          // optional: true | {rounds: 'first'|'all', effort, budgetMin}; see "Pre-review"
 }
 ```
 
@@ -225,10 +283,11 @@ Each package starts when its deps finish. Every implement/fix step walks the pac
 
 ```js
 { root: "C:\\path\\to\\project", ids: ["WP01", "WP02"], testCmd: "python -m pytest -q", logPrefix: "run",
-  engineStatus: { WP02: "QUOTA" } }   // optional, from `jbr wait`/`status`: quota/crash packages are not reviewed
+  engineStatus: { WP02: "QUOTA" },    // optional, from `jbr wait`/`status`: quota/crash packages are not reviewed
+  jbr: "/c/Users/you/dev/jev-build-router", preReview: false }   // optional pre-review (needs jbr + reportsDir)
 ```
 
-Returns `[{wp, verdict, confirmed_failures, refuted_findings, low_findings, pytest_summary, test_count, ownership_violations, mutation_check, passed_count}]`; save it as json and feed to `python -m jbr compose-fix <file> <round>`. Rows with `verdict: "blocked"` (engine did no work) get no fix file: re-run that package on another engine for the same round.
+Returns `[{wp, verdict, confirmed_failures, refuted_findings, low_findings, pytest_summary, test_count, ownership_violations, mutation_check, passed_count[, prereview]}]`; save it as json and feed to `python -m jbr compose-fix <file> <round>`. Rows with `verdict: "blocked"` (engine did no work) get no fix file: re-run that package on another engine for the same round.
 
 The skill in `skill/SKILL.md` (installed as `/build-router` in `~/.claude/skills/build-router/` and `~/.agents/skills/build-router/`) walks Claude Code through: `jbr probe` / `pick` -> `jbr route` (live availability + chain) -> Workflow `build_dag.js` with `routing.json .chains` -> `review_level.js` + `compose-fix` for out-of-band reviews.
 
@@ -251,4 +310,4 @@ The skill in `skill/SKILL.md` (installed as `/build-router` in `~/.claude/skills
 cd /c/Users/a8878/dev/jev-build-router && python -m pytest -q
 ```
 
-Router tests monkeypatch `urllib.request.urlopen` (no real TypeSafe calls); runner and probe tests use `--dry-run` / a fake `subprocess.run` (agy/codex never executed); every test gets its own `JBR_STATE` (autouse fixture in `tests/conftest.py`), so `~/.jbr` is never touched. Workflow tests (`tests/test_workflows.py`, `tests/test_quota.py`, `tests/test_chain.py`) run the scripts under node via `tests/workflow_harness.js` with stubbed agents and are skipped when node is missing.
+Router tests monkeypatch `urllib.request.urlopen` (no real TypeSafe calls); runner and probe tests use `--dry-run` / a fake `subprocess.run` (agy/codex never executed); every test gets its own `JBR_STATE` (autouse fixture in `tests/conftest.py`), so `~/.jbr` is never touched. `tests/test_prereview.py` drives `jbr prereview` through a fake `run` (ocr and git never executed). Workflow tests (`tests/test_workflows.py`, `tests/test_quota.py`, `tests/test_chain.py`, `tests/test_prereview.py`) run the scripts under node via `tests/workflow_harness.js` with stubbed agents and are skipped when node is missing.
