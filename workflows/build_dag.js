@@ -31,7 +31,11 @@
 //   reportsDir: '/Users/me/.jbr/runs/<key>/reports',  // REQUIRED with external engines: `python -m jbr --project <root> paths` .reports_dir
 //   testCmd: 'python -m pytest -q',           // run from posixRoot
 //   rules: '...',                             // COMMON rules text override (optional)
-//   sourceHint: 'src layout under src/pkg'    // one line about where code lives (optional)
+//   sourceHint: 'src layout under src/pkg',   // one line about where code lives (optional)
+//   preReview: false                          // true | { rounds: 'first'|'all', effort: 'low', budgetMin: 45 }: before a Claude
+//                                             // review, `jbr prereview` runs open-code-review on local Ollama over the package's
+//                                             // changed owned files; its findings reach the reviewer as unverified hints. Needs jbr
+//                                             // + reportsDir. Skipped / failed / timed out: the review runs without it (default off)
 // }
 export const meta = {
   name: 'jbr-build-dag',
@@ -72,6 +76,8 @@ const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'olla
 const ENGINE_CHAIN = Array.isArray(A.engineChain) && A.engineChain.length ? A.engineChain : DEFAULT_CHAIN
 const ENGINE_WAITS = Object.assign({ ollama_qwen: 16 }, A.engineWaits || {})
 const FALLBACK = A.fallbackEngine || LAST_RESORT
+const PRE = A.preReview ? Object.assign({ rounds: 'first', effort: 'low', budgetMin: 45 }, A.preReview === true ? {} : A.preReview) : null
+const PRE_WAITS = PRE ? Math.ceil(PRE.budgetMin / 8.5) + 1 : 0   // jbr enforces the budget, so the marker always comes
 const isExternal = e => e !== LAST_RESORT
 const uniq = xs => [...new Set(xs.filter(Boolean))]
 // chain-derived engines (auto / after a pin) need args.jbr when external; without it they are dropped
@@ -94,6 +100,7 @@ const engineOf = id => CHAINS[id][0]
 if (!JBR && Object.values(CHAINS).some(c => c.some(isExternal))) throw new Error('args.jbr (POSIX path of jev-build-router) is required when a package is routed to an external engine')
 if (!REPORTS && Object.values(CHAINS).some(c => c.some(isExternal))) throw new Error('args.reportsDir is required when a package is routed to an external engine: take .reports_dir from `python -m jbr --project <root> paths` (jbr keeps run files outside the project)')
 // every dependency must be a package in this run or already done; a silent drop would start a package with its dep unbuilt
+if (PRE && (!JBR || !REPORTS)) throw new Error('args.preReview needs args.jbr and args.reportsDir (`python -m jbr --project <root> paths` .reports_dir)')
 for (const [id, deps] of Object.entries(PKGS)) for (const d of deps) if (!DONE.has(d) && !PKGS[d]) throw new Error(`unknown dependency ${d} of ${id}: not in args.packages or args.done`)
 
 const specPath = id => under(PROMPTS, `${id}.md`)
@@ -142,6 +149,9 @@ const REVIEW_SCHEMA = { type: 'object', properties: {
   verdict: { type: 'string', enum: ['accept', 'fix'] } },
   required: ['wp', 'pytest_summary', 'test_count', 'passed_criteria', 'failures', 'mutation_check', 'ownership_violations', 'verdict'] }
 const VERDICT_SCHEMA = { type: 'object', properties: { refuted: { type: 'boolean' }, reason: { type: 'string' } }, required: ['refuted', 'reason'] }
+const PRE_SCHEMA = { type: 'object', properties: {
+  status: { type: 'string', enum: ['ok', 'skipped', 'failed', 'timeout'] }, reason: { type: 'string' }, findings: { type: 'number' } },
+  required: ['status', 'findings'] }
 
 const COMMON = A.rules || `Repository root: ${ROOT} (other agents are working on OTHER packages in the same checkout right now).
 Rules: ${A.sourceHint ? A.sourceHint + '. ' : ''}Own only the files listed for your package; you may append an export line to another package's index/__init__ file, nothing else. Never edit another package's tests or source: if they block you, work around it inside your own files and report it in notes. Do not run git commit/checkout/stash/reset. Do not create files outside the repo.
@@ -156,7 +166,19 @@ The package code already exists on disk (read it; do not start over). Spec: ${sp
 CONFIRMED DEFECTS:
 ${findings.map((f, i) => `${i + 1}. [${f.severity}] ${f.criterion}\n   Evidence: ${f.evidence}\n   Required fix: ${f.fix}`).join('\n')}`
 
-const reviewPrompt = (id, round) => `Adversarial fresh-context review of work package ${id} (review round ${round}) in ${ROOT}. You did not write this code; judge only what is on disk.
+const preStem = (id, round) => `prereview-${id}-r${round}`
+const preReviewPrompt = (id, round) => `You run the cheap pre-reviewer for work package ${id} (review round ${round}). You do NOT review code yourself and you edit nothing.
+1. cd ${POSIX} && PYTHONPATH="${JBR}" python -m jbr --prompts "${PROMPTS}"${JBR_ARGS} --project "${POSIX}" prereview ${id} --tag r${round} --effort ${PRE.effort} --budget-min ${PRE.budgetMin} --detach
+   (returns at once and prints "spawned pid=... marker=${REPORTS}/${preStem(id, round)}.done"). If it does not print "spawned pid=", STOP: return status 'failed', findings 0, reason = its output. Do not wait.
+2. Wait for the marker with repeated Bash calls, each: for i in $(seq 1 17); do [ -f ${REPORTS}/${preStem(id, round)}.done ] && break; sleep 30; done; cat ${REPORTS}/${preStem(id, round)}.done 2>/dev/null || echo STILL-RUNNING
+   Repeat until it prints a line (up to ${PRE_WAITS} times). Still missing after that: return status 'timeout', findings 0.
+3. cat ${REPORTS}/${preStem(id, round)}.json and return its "status" lowercased, its "reason", and the number of entries in its "findings" list.`
+
+// pre: { findings } when the pre-reviewer left findings, else null (the prompt is then exactly the plain review)
+const preHint = (id, round, pre) => pre ? `
+0. Pre-review hints: a cheap local reviewer (open-code-review on a local model; it reads the diff, not the tests, and only skims the spec) left ${pre.findings} line-level findings in ${REPORTS}/${preStem(id, round)}.json ("findings": path, start_line, end_line, content, suggestion_code). They are UNVERIFIED and may be wrong: check each quickly at the cited lines, report each real one as a failure whose criterion starts with "pre-review: " (your own severity), drop the rest and any finding on a file this package does not own. Then spend your effort on what it does not cover: every acceptance criterion, the tests, ownership and the mutation check.` : ''
+
+const reviewPrompt = (id, round, pre) => `Adversarial fresh-context review of work package ${id} (review round ${round}) in ${ROOT}. You did not write this code; judge only what is on disk.${preHint(id, round, pre)}
 1. Read ${specPath(id)} fully: goal, owned files, acceptance criteria.
 2. Run this package's own test files first, then the full suite once: cd ${POSIX} && ${TEST_CMD} 2>&1 | tail -20. Record the summary and total count. Other reviewers and implementers work on other packages concurrently: if a failure is in a file outside this package, wait 60 seconds and re-run; report it only if it reproduces twice, and then as low severity.
 3. Check EVERY acceptance criterion against the code and tests with file:line evidence; verify field names, enum members, signatures, numeric tolerances literally as written.
@@ -167,9 +189,23 @@ const reviewPrompt = (id, round) => `Adversarial fresh-context review of work pa
 const refutePrompt = (id, f) => `Verify a review finding for work package ${id} in ${ROOT}. Reported failure: ${JSON.stringify(f)}.
 Read ${specPath(id)} for the criterion's exact wording, read the cited files, run the relevant package tests (cd ${POSIX} && ${TEST_CMD} <path> 2>&1 | tail -15). REAL means the code truly violates the criterion as written; REFUTED means the reviewer misread the criterion, the code, or the output. Refute only with concrete evidence that the criterion is satisfied.`
 
+// Cheap first pass (args.preReview): never blocks or fails the review; anything but 'ok' with findings = no hints.
+async function preReview(id, round) {
+  if (!PRE || (PRE.rounds !== 'all' && round > 1)) return null
+  const r = await agent(preReviewPrompt(id, round), { label: `prereview:${id}:r${round}`, phase: 'Review', schema: PRE_SCHEMA, effort: 'low' })
+  const status = r && typeof r === 'object' && r.status ? r.status : 'failed'
+  const findings = r && Number.isFinite(r.findings) ? r.findings : 0
+  if (status !== 'ok') log(`${id}: pre-review r${round} ${status}${r && r.reason ? ' (' + r.reason + ')' : ''}: reviewing without it`)
+  return { status, findings }
+}
+const preRow = (pre, confirmed) => pre ? { status: pre.status, findings: pre.findings,
+  confirmed: confirmed.filter(f => /^pre-review:/i.test(f.criterion || '')).length } : undefined
+
 async function reviewRound(id, round) {
-  const rev = await agent(reviewPrompt(id, round), { label: `review:${id}:r${round}`, phase: 'Review', schema: REVIEW_SCHEMA, effort: 'high' })
-  if (!rev) return { verdict: 'fix', confirmed: [{ criterion: 'reviewer crashed', severity: 'high', evidence: 'no result', fix: 're-run' }], low: [], rev: null }
+  const pre = await preReview(id, round)
+  const hints = pre && pre.status === 'ok' && pre.findings > 0 ? pre : null
+  const rev = await agent(reviewPrompt(id, round, hints), { label: `review:${id}:r${round}`, phase: 'Review', schema: REVIEW_SCHEMA, effort: 'high' })
+  if (!rev) return { verdict: 'fix', confirmed: [{ criterion: 'reviewer crashed', severity: 'high', evidence: 'no result', fix: 're-run' }], low: [], rev: null, pre: preRow(pre, []) }
   const serious = rev.failures.filter(f => f.severity !== 'low')
   const votes = await parallel(serious.map(f => () =>
     agent(refutePrompt(id, f), { label: `verify:${id}:r${round}`, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'medium' })
@@ -180,7 +216,7 @@ async function reviewRound(id, round) {
     log(`${id}: review round ${round} verdict 'fix' with zero failure entries (${rev.pytest_summary}); kept as fix`)
     confirmed.push({ criterion: 'reviewer verdict fix without failure entries', severity: 'medium', evidence: rev.pytest_summary || 'no pytest summary reported', fix: 'make the full suite green and satisfy every acceptance criterion in the spec' })
   }
-  return { verdict: confirmed.length ? 'fix' : 'accept', confirmed, low: rev.failures.filter(f => f.severity === 'low'), rev }
+  return { verdict: confirmed.length ? 'fix' : 'accept', confirmed, low: rev.failures.filter(f => f.severity === 'low'), rev, pre: preRow(pre, confirmed) }
 }
 
 const statusOf = res => (res && res.engine_status) || 'ok'  // null (agent crashed) = unknown: keep reviewing
@@ -240,7 +276,8 @@ async function build(id) {
   }
   let round = 1
   let r = await reviewRound(id, round)
-  history.push({ stage: `review${round}`, verdict: r.verdict, confirmed: r.confirmed.length, low: r.low.length, tests: r.rev ? r.rev.test_count : 0 })
+  history.push({ stage: `review${round}`, verdict: r.verdict, confirmed: r.confirmed.length, low: r.low.length, tests: r.rev ? r.rev.test_count : 0,
+    ...(r.pre ? { prereview: r.pre } : {}) })
   while (r.verdict === 'fix' && round <= MAX_FIX_ROUNDS) {
     log(`${id}: review round ${round} -> ${r.confirmed.length} confirmed defects, fixing`)
     const f = await step(id, 'fix', round, r.confirmed.concat(r.low))
@@ -252,7 +289,8 @@ async function build(id) {
     }
     round += 1
     r = await reviewRound(id, round)
-    history.push({ stage: `review${round}`, verdict: r.verdict, confirmed: r.confirmed.length, low: r.low.length, tests: r.rev ? r.rev.test_count : 0 })
+    history.push({ stage: `review${round}`, verdict: r.verdict, confirmed: r.confirmed.length, low: r.low.length, tests: r.rev ? r.rev.test_count : 0,
+    ...(r.pre ? { prereview: r.pre } : {}) })
   }
   log(`${id}: ${r.verdict === 'accept' ? 'ACCEPTED' : 'UNRESOLVED after ' + MAX_FIX_ROUNDS + ' fix rounds'}`)
   return row(r.verdict, round, r, {})

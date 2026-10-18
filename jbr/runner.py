@@ -313,6 +313,11 @@ def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag:
         argv += ["--tag", tag]
     if dry_run:
         return {"pid": None, "argv": argv, "marker": str(paths["done"])}
+    return {"pid": launch_detached(argv, root, paths["stdout"]), "argv": argv, "marker": str(paths["done"])}
+
+
+def launch_detached(argv: list[str], cwd: pathlib.Path, stdout_path: pathlib.Path) -> int:
+    """Start a `python -m jbr ...` child that survives the caller (and its timeout); returns the pid."""
     env = _env()
     # make the jbr package importable from the child no matter where the project lives
     jbr_root = str(pathlib.Path(__file__).resolve().parents[1])
@@ -322,9 +327,9 @@ def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag:
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
         kw["start_new_session"] = True
-    out = open(paths["stdout"], "w", encoding="utf-8")
-    p = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env, **kw)
-    return {"pid": p.pid, "argv": argv, "marker": str(paths["done"])}
+    out = open(stdout_path, "w", encoding="utf-8")
+    p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env, **kw)
+    return p.pid
 
 
 def read_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None) -> dict | None:

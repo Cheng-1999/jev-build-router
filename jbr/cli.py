@@ -1,4 +1,4 @@
-"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick
+"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview
 
 Global options (before the subcommand):
   --project <root>          project root (default: cwd)
@@ -10,6 +10,10 @@ Global options (before the subcommand):
 Engine chain: `probe <engine>` prints AVAILABLE (exit 0) | EXHAUSTED <until> (exit 3) |
 UNAVAILABLE <reason> (exit 4) from the shared state file ($JBR_STATE, default ~/.jbr/engine_state.json)
 or one cheap live probe; `pick [--exclude a,b]` prints the first available engine by priority.
+
+Pre-review: `prereview <WP>` runs alibaba/open-code-review on the package's changed owned files against
+local Ollama (jbr/prereview.py) and writes prereview-<WP>[-tag].json; it always exits 0 (the status is
+in the json and the .done marker), so a missing tool or a slow model never stops a build.
 """
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ import json
 import pathlib
 import sys
 
-from jbr import paths, router, runner, state
+from jbr import paths, prereview, router, runner, state
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_ENGINES = REPO_ROOT / "engines.json"
@@ -121,6 +125,23 @@ def _parser() -> argparse.ArgumentParser:
     qc.add_argument("--force", action="store_true", help="even with unmerged engine work in it")
 
     sub.add_parser("paths", help="print where jbr keeps this project's files (pass reportsDir to the Workflow scripts)")
+
+    pv = sub.add_parser("prereview", help="cheap first-pass review: open-code-review on local Ollama; always exits 0")
+    pv.add_argument("wp_id")
+    pv.add_argument("--tag", default="", help="artifact tag, e.g. r1 for review round 1")
+    pv.add_argument("--commit", default="", help="review this commit instead of the uncommitted workspace")
+    pv.add_argument("--url", default=prereview.DEFAULT_URL, help="OpenAI-compatible endpoint (default: local Ollama)")
+    pv.add_argument("--model", default="", help="default: the backend engine's model")
+    pv.add_argument("--backend-engine", default=prereview.BACKEND_ENGINE,
+                    help="engines.json key whose model is the default (disabled engine = SKIPPED)")
+    pv.add_argument("--effort", choices=["low", "medium", "high"], default=prereview.DEFAULT_EFFORT)
+    pv.add_argument("--budget-min", type=float, default=prereview.DEFAULT_BUDGET_MIN,
+                    help="whole run; waiting for another prereview (max 5 min, then SKIPPED busy) included; then TIMEOUT")
+    pv.add_argument("--no-spec", action="store_true", help="do not pass ops/prompts/<WP>.md as review background")
+    pv.add_argument("--allow-remote", action="store_true",
+                    help="permit a non-loopback --url (repository content then leaves this machine)")
+    pv.add_argument("--detach", action="store_true", help="run in the background; poll the .done marker")
+    pv.add_argument("--dry-run", action="store_true", help="print scope and argv; never run ocr")
 
     pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
     pk.add_argument("--exclude", default="", help="comma-separated engine keys to skip")
@@ -252,7 +273,7 @@ def cmd_pick(a) -> int:
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
 # sub-options that take one value: the token after them is a VALUE, never a global option
 VALUE_OPTS = {"--reason", "--build", "--base", "--test-cmd", "--max", "--test-timeout-min", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
-              "--model", "--timeout-min", "--poll", "--exclude"}
+              "--model", "--timeout-min", "--poll", "--exclude", "--commit", "--url", "--backend-engine", "--effort", "--budget-min"}
 
 
 def _hoist_globals(argv: list[str]) -> list[str]:
@@ -260,7 +281,8 @@ def _hoist_globals(argv: list[str]) -> list[str]:
     if not argv:
         return argv
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
-                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths", "queue"}), None)
+                    {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths", "queue",
+                     "prereview"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
@@ -441,6 +463,30 @@ def cmd_queue(a) -> int:
     return 0
 
 
+def cmd_prereview(a) -> int:
+    project = pathlib.Path(a.project).resolve()
+    if a.detach:
+        args = ["--engines", str(pathlib.Path(a.engines).resolve()), "--packages", a.packages, "--prompts", a.prompts,
+                "--url", a.url, "--backend-engine", a.backend_engine, "--effort", a.effort, "--budget-min", str(a.budget_min)]
+        if a.reports:
+            args += ["--reports", a.reports]
+        for ov in a.available:
+            args += ["--available", ov]
+        args += (["--commit", a.commit] if a.commit else []) + (["--model", a.model] if a.model else [])
+        args += (["--no-spec"] if a.no_spec else []) + (["--allow-remote"] if a.allow_remote else [])
+        res = prereview.spawn(project, a.wp_id, args, tag=a.tag, reports_dir=a.reports, dry_run=a.dry_run)
+        print(f"{a.wp_id}: {'[dry-run] ' + json.dumps(res['argv']) if a.dry_run else 'spawned pid=' + str(res['pid'])} marker={res['marker']}")
+        return 0
+    res = prereview.prereview(project, a.wp_id, _engines(a), project / a.packages, a.prompts, tag=a.tag,
+                              reports_dir=a.reports, url=a.url, model=a.model, backend_engine=a.backend_engine,
+                              effort=a.effort, budget_min=a.budget_min, commit=a.commit, spec=not a.no_spec,
+                              allow_remote=a.allow_remote, dry_run=a.dry_run)
+    print(f"[jbr prereview] {a.wp_id} {res['status']}: {res['reason']} ({res['seconds']}s) -> {res['paths']['json']}")
+    if a.dry_run and res.get("argv"):
+        print(json.dumps({"scope": res.get("scope"), "argv": res["argv"], "env": res.get("env")}, indent=2))
+    return 0
+
+
 def cmd_paths(a) -> int:
     project = pathlib.Path(a.project).resolve()
     from jbr import ledger
@@ -456,7 +502,8 @@ def main(argv: list[str] | None = None) -> int:
     a = _parser().parse_args(argv)
     return {"route": cmd_route, "run": cmd_run, "spawn": cmd_spawn, "wait": cmd_wait,
             "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick,
-            "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths, "queue": cmd_queue}[a.cmd](a)
+            "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths, "queue": cmd_queue,
+            "prereview": cmd_prereview}[a.cmd](a)
 
 
 if __name__ == "__main__":

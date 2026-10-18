@@ -106,6 +106,21 @@ Every `ops/prompts/<WP>.md` (or the plan's `--prompts` dir) must have, before yo
 5. **Record.** After every build, save the Workflow's returned list (the per-package `[{wp, engine, final, history, low_open, ...}]`) to a JSON file and run `PYTHONPATH="$JBR" python -m jbr [--packages ...] record <result.json> --build <name>`. It appends one ledger line per package (implementer = the engine whose run succeeded, fix rounds, confirmed defects, quota hits, minutes from the run markers). Packages finished outside the workflow and never reviewed are not recorded: they would skew the scorecard.
 6. **Monitor.** `PYTHONPATH="$JBR" python -m jbr status` (routing + `.done` markers), `PYTHONPATH="$JBR" python -m jbr wait WP05 WP06 --timeout-min 70` (exit 124 while a marker is still missing), `cat ~/.jbr/engine_state.json` (who is exhausted until when). Every `python -m jbr` call needs `PYTHONPATH="$JBR"` unless `pip install -e` was run.
 
+## Optional pre-review: open-code-review on local Qwen (2026-10-18, opt-in)
+
+`PYTHONPATH="$JBR" python -m jbr prereview <WP> [--tag r1] [--commit <sha>] [--dry-run]` runs alibaba/open-code-review
+(`ocr`) on the package's changed owned files against local Ollama and writes `prereview-<WP>[-tag].json` in the
+reports dir. It always exits 0: SKIPPED / FAILED / TIMEOUT are statuses, never build failures. In the workflows,
+pass `preReview: true` (build_dag.js, review_level.js; both need `jbr` and `reportsDir`). Its findings become step 0
+of the Claude reviewer's prompt as unverified hints; confirmed ones are refuted like any other failure.
+- Local only: a non-loopback `--url` is refused without `--allow-remote`. **Never pass `--allow-remote` without the
+  owner's OK in chat**: repository content (not only the diff) would leave the machine.
+- Run the `system-check` skill before a build that uses it: it loads the same Qwen as `ollama_qwen` (its KV cache
+  grows well past the 18 GB of weights on a long review). One machine-wide lock serializes prereviews (Ollama serves
+  one request at a time); a package that waits 5 min for it is reviewed without hints (`busy`).
+- It does not read test files and does not check acceptance criteria. It never replaces the review. See
+  `docs/OPEN_CODE_REVIEW_PROPOSAL.md` for the spike numbers before you turn it on for a build.
+
 ## Qwen backlog lane (user rule, 2026-10-10): non-urgent or easy work, unattended
 
 Local Qwen is free but slow, and this Mac serves one Ollama request at a time (two concurrent jobs: 72 s,
