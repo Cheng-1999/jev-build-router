@@ -8,8 +8,10 @@ spend their effort on what it misses?
 package diff (~1,100 lines), local Qwen 27B behind ocr took **30-70 min** per review. Across two complete runs its
 16 comments held **no functional bug**: 4 real stale-documentation defects, 5 valid maintainability points,
 1 plausible design issue, 1 artifact of my snapshot, and **5 false positives**. The false ones were its
-highest-severity comments: miscounts of a long literal list, presented as "this test will fail". Its precision on this sample was far
-below the benchmark's claim, and the wall-clock cost would serialize on one GPU across parallel packages. Use it
+highest-severity comments: miscounts of a long literal list, presented as "this test will fail". In a clean
+seeded run (C2) it **did catch a real defect class**: a test-gaming hack that Claude's round-2 review had caught,
+flagged at high severity on the exact lines in 25 min. Its precision on this sample was far below the benchmark's
+claim, and the wall-clock cost would serialize on one GPU across parallel packages. Use it
 where time is free (the unattended Qwen backlog lane, out-of-band `review_level.js`). Decide on wider use from the
 `prereview.confirmed` counts the workflows now record. Details below.
 
@@ -165,7 +167,8 @@ Isolation, enforced in code and covered by tests:
 |---|---|---|---|---|---|---|
 | A | diff only | medium (2 rounds) | 32 min | 4.16M / 15.9k (93%) | 157 (9) | 5 |
 | B | diff + package spec (`--background-file`) | low (1 round) | 30 min | 3.72M / 21.9k (94%) | 104 (4) | 11 |
-| C | B's tree + one re-injected round-2 defect | low | 71 min, then stopped by SIGTERM | 1.99M / 13.5k (85%) | 74 (3) | 4 (partial) |
+| C | B's tree + one re-injected round-2 defect; commit message named it | low | 71 min, then stopped by SIGTERM | 1.99M / 13.5k (85%) | 74 (3) | 4 (partial) |
+| C2 | C's tree, neutral commit message, run through `jbr prereview` | low | 25 min | 2.62M / 18.5k (93%) | 101 (5) | 8 |
 
 Run A's wall clock in my log reads 117 min because the Mac idle-slept for 86 min mid-run (pmset log). ocr's own
 elapsed time (monotonic clock) is 32 min. Times are for two file groups, reviewed one after another (Ollama serves
@@ -188,7 +191,13 @@ one request at a time).
 - **The artifact:** "`blocker` is not a method on `MapBuilder`" is true for the tree I gave it, so ocr's agent
   does check cross-file APIs. In a real workspace run the upstream package's code is present.
 - **The spec as background (B vs A):** twice the comments, still no functional bug, and the same miscount.
-- **Run time varies:** the same tree at the same effort took 30 min (B) and more than 71 min (C).
+- **Run time varies:** the same tree at the same effort took 30 min (B), 25 min (C2) and more than 71 min (C).
+- **C2 comments:**
+  - the seeded defect, caught;
+  - 1 real stale doc count;
+  - 2 valid maintainability points;
+  - 2 false, one rated critical (a "tag index drift" that cannot happen, because the earlier pass adds only visuals);
+  - 2 artifacts of the snapshot's missing builder method.
 - **Tool use:** the local model sent malformed `code_comment` arguments twice in run A (a flat object instead of
   `{comments: [...]}`), wrong file paths and line ranges, and unescaped regexes to `git grep`. ocr reported the
   errors back and the model recovered, but each one costs a round trip.
@@ -204,17 +213,23 @@ one request at a time).
   fidelity). ocr flagged none of these: it skips test files by default and judges code, not deliverables.
 - **Overlap is near zero on this package.** ocr found stale documentation and design fragilities that Claude's
   acceptance-driven review never reported. Claude found spec, test and test-gaming problems that ocr cannot see.
-- **Seeded recall (run C), inconclusive, leaning negative.** I re-injected the round-2 test-gaming wrapper (12
-  lines) into the snapshot.
-  - After 71 min the file group holding it had still produced no comment, so I stopped the run. It delivered
-    4 comments, all on the other group and of the same kinds as run B.
-  - Its plan step did describe the wrapper as "masking a real count mismatch to satisfy a test". But my commit
-    message for the seeded snapshot named the defect, and in `--commit` mode ocr gives the commit message to
-    the model as context, so that was a hint, not a detection.
-  - A clean rerun (neutral message, a fixed budget) is the first item under "Before widening it".
-  - Stopping it showed one useful thing: on SIGTERM, ocr wrote its partial JSON within 2 s (exit 1, status
-    `failed`/cancelled, findings kept). `jbr prereview` turns such a result into OK with the partial findings
-    (`run_group` sends SIGTERM 30 s before the kill).
+- **Seeded recall: caught (C2).** I re-injected the round-2 test-gaming wrapper into the snapshot: 12 lines,
+  including a one-line comment saying why it was there.
+  - The clean run (neutral commit message "WP27: skirmish map dressing and cover pass", run end to end through
+    `jbr prereview --commit --no-spec --budget-min 90`) flagged it at **high** severity on exactly the injected
+    lines.
+  - Its reasoning matched Claude's round-2 evidence: consumers iterate the real array; serialization and cloning
+    break; the test, not the producer, should change.
+  - The first attempt (C) is void. Its commit message named the defect, ocr gives the commit message to the model
+    as context in `--commit` mode, and the run was stopped at 71 min before reaching that file group. Stopping it
+    did show that on SIGTERM ocr writes its partial JSON within 2 s (exit 1, status `failed`/cancelled, findings
+    kept). `jbr prereview` uses such a result as OK with the partial findings (`run_group` sends SIGTERM 30 s
+    before the kill).
+  - C2 also exercised the production path end to end: pid+deadline lock taken and released, `--timeout` derived
+    from the budget, no excludes needed (the commit held only owned files), status `OK`, `.done` =
+    `0 24.9min OK`.
+  - One seeded defect is one data point. It shows that ocr on local Qwen can find a code-level hack in a diff; it
+    says nothing about its recall in general.
 
 ### Resource cost on this Mac
 
@@ -230,8 +245,8 @@ one request at a time).
 1. **Merge the stage as opt-in** (this branch). It is isolated (local only, never fails a build, prompts are
    identical when off) and it gives the workflows the measurement hook: `prereview: {status, findings, confirmed}`.
 2. **Do not enable it by default.** On this sample:
-   - It did not find what the refute step exists for (functional bugs). Its loudest comments were wrong, and it
-     cannot see tests or deliverables.
+   - It found no functional bug in the real snapshot. It did find the seeded code-level hack (C2), but its
+     loudest comments are often wrong, and it cannot see tests or deliverables.
    - Its ~30 min per package serializes on one GPU. In a parallel `build_dag.js` level, every package after the
      first gets `busy` and no hints, and the one that runs delays its Claude review by half an hour.
 3. **Where it fits now:**
@@ -240,9 +255,8 @@ one request at a time).
    - big refactors or security-relevant diffs, where its built-in rules (NPE, thread safety, XSS, SQLi) apply.
      This package was game data and had none of that.
 4. **Before widening it:**
-   1. Rerun the seeded-defect test cleanly (neutral commit message, 45 min budget). Then run it on 3-5 more
-      packages whose pre-fix code is recoverable (queue-lane worktrees keep it), and compare `confirmed` with the
-      Claude round-1 findings.
+   1. Run it on 3-5 more packages whose pre-fix code is recoverable (queue-lane worktrees keep it), and compare
+      `confirmed` with the Claude round-1 findings. The seeded rerun (C2) is done: caught.
    2. Try the main task with thinking on (`extra_body: {"reasoning_effort": "low"}`) or a stronger local model.
    3. Add prereview yield to `jbr record` / the scorecard.
    4. A cloud endpoint (where the benchmark's numbers come from) would be the fair precision test, but it is a
