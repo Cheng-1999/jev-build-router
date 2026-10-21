@@ -69,7 +69,7 @@ def engines():
     before that keep their two-engine fixture."""
     from jbr import router
     return router.load_engines(REPO / "engines.json", {"agy_claude_opus": False, "codex_astra": False,
-                                                         "ollama_qwen": False})
+                                                         "ollama_qwen": False, "lan_qwen": False})
 
 
 @pytest.fixture

@@ -72,7 +72,7 @@ def test_scorecard_aggregates_per_engine(project, tmp_path):
 
 
 def _engines():
-    return router.load_engines(REPO / "engines.json", {"ollama_qwen": False})
+    return router.load_engines(REPO / "engines.json", {"ollama_qwen": False, "lan_qwen": False})
 
 
 def test_assign_writes_routing_build_dag_can_read(tmp_path):

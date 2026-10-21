@@ -60,6 +60,7 @@ agy is the base worker. Each implement/fix step prefers, in order (`priority` in
 | 2 | `agy_claude_opus` | agy, `auto:claude-opus` (newest Claude Opus; 2026-10-16: claude-opus-5-5-high) |
 | 3 | `codex_astra` | codex, gpt-6-astra (`-s workspace-write`) |
 | 4 | `ollama_qwen` | local Qwen 3.8 27B on Ollama via codex `--oss` (Mac only; free, slow; runners wait ~140 min) |
+| 4 | `lan_qwen` | Qwen on a LAN OpenAI-compatible server, codex with `CODEX_HOME=~/.codex-local` (free; needs `LOCAL_LLM_KEY`; runners wait ~140 min) |
 | 5 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
 
 **agy model names** (`jbr/models.py`): an agy engine's `"model"` may be `auto:<family>` instead of a pinned id, so a
@@ -142,6 +143,9 @@ PYTHONPATH="$JBR" python -m jbr --project . queue clean WP07         # after mer
 Each package gets a worktree on `jbr/<engine>/<WP>-<stamp>` from a pinned base, with `.venv`/`node_modules`
 symlinked in; the worker runs the engine, then the package's test command, records changed files and the
 test tail, and moves on. It never commits, pushes or reviews, and stops when the engine's probe fails.
+On Windows the links are directory junctions when symlinks need a privilege you lack (no Developer Mode), and
+a worktree path longer than 120 characters moves to `~/.jbr/runs/wt/<hash>/<WP>-<stamp>`: Git for Windows
+refuses worktree paths past ~210 characters, and the project's own files must still fit under MAX_PATH.
 
 ## Pre-review: open-code-review on local Qwen (opt-in, since 2026-10-18)
 
@@ -209,9 +213,33 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | `model`, `effort` | Passed to the CLI (`--model`/`-m`, `--effort`/`model_reasoning_effort`). |
 | `parallel_limit` | Informational for Jev (and you); not enforced by `spawn`. |
 | `available` | Static on/off switch, `true` for all four defaults since the chain (live probes decide). Override per call with `--available k=yes|no` (a `no` engine probes `UNAVAILABLE disabled`). A single usable engine short-circuits routing without an API call. |
-| `priority` | Chain order, 1 = most preferred. `jbr pick`, `route` (Jev's policy and the fallback chains) and the default `engineChain` follow it. |
+| `priority` | Chain order, 1 = most preferred. `jbr pick`, `route` (Jev's policy and the fallback chains) and the default `engineChain` follow it. Ties keep engines.json order. |
+| `env` | Optional `{VAR: value}` (`~` expanded) set for the engine's run and its probe, e.g. `lan_qwen`'s `CODEX_HOME`. |
+| `windows_sandbox` | Optional codex sandbox used instead of `workspace-write` on Windows only (`danger-full-access` where the sandboxed shell fails with `CryptUnprotectData failed`). |
+| `effort` | An empty string drops `model_reasoning_effort` (servers that take no effort). |
 
-Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `codex_astra`.
+Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `codex_astra`, `ollama_qwen`, `lan_qwen`.
+
+**LAN Qwen setup (`lan_qwen`).** codex with the user's normal `~/.codex` sends ~108k tokens (plugins, skills, MCP
+tools, AGENTS.md), more than a 32K local model holds. `lan_qwen` therefore runs codex with its own slim home,
+`~/.codex-local/config.toml`, holding only the provider:
+
+```toml
+model_provider = "lan"
+model = "<model id from GET /v1/models>"
+model_context_window = 32768
+approval_policy = "never"
+
+[model_providers.lan]
+name = "LAN model"
+base_url = "http://<host>:<port>/v1"
+env_key = "LOCAL_LLM_KEY"
+wire_api = "responses"
+```
+
+The server must serve the Responses API (`POST /v1/responses`). The key lives in the user environment variable
+`LOCAL_LLM_KEY`; jbr never reads or sends it. codex's base prompt is then ~9k tokens. Probe and run both use the
+codex path (no direct HTTP call), so a server that is down, or a missing key, probes UNAVAILABLE and the chain skips it.
 
 ## work_packages.json
 

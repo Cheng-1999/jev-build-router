@@ -204,3 +204,14 @@ def test_status_and_compose_fix_via_cli(project, capsys):
     assert (reports(project) / "fix-WP03-round2.md").exists()
     assert cli.main(["--project", str(project), "status"]) == 0
     assert "no runs found" in capsys.readouterr().out
+
+
+def test_cli_survives_a_legacy_code_page_console(monkeypatch):
+    import io
+    from jbr import cli
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp950")
+    monkeypatch.setattr(cli.sys, "stdout", out)
+    cli._tolerant_console()
+    print("Café 👋", file=out)   # raised UnicodeEncodeError before (Windows zh-TW console)
+    out.flush()
+    assert out.buffer.getvalue().startswith(b"Caf?")

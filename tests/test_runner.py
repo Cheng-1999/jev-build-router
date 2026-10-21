@@ -51,7 +51,8 @@ def test_build_command_agy_gemini_adds_effort(tmp_path, engines):
     assert cmd[cmd.index("--effort") + 1] == "high"
 
 
-def test_build_command_codex_shape(tmp_path, engines):
+def test_build_command_codex_shape(tmp_path, engines, monkeypatch):
+    monkeypatch.setattr(runner, "IS_WINDOWS", False)
     cmd = runner.build_command(engines["codex_astra"], tmp_path / "p.md", tmp_path, tmp_path / "last.md")
     assert cmd[:5] == ["codex", "exec", "-s", "workspace-write", "--skip-git-repo-check"]
     assert cmd[cmd.index("-m") + 1] == "gpt-6-astra"
@@ -256,9 +257,9 @@ def test_shipped_ollama_engine_sits_before_claude_in_the_chain():
     engines = router.load_engines(REPO / "engines.json")
     assert engines["ollama_qwen"]["local_provider"] == "ollama"
     assert "ollama_qwen" in router.available_engines(engines)   # on by default; its live probe decides
-    assert router.by_priority(engines)[-2:] == ["ollama_qwen", "claude_subagent"]
+    assert router.by_priority(engines)[-3:] == ["ollama_qwen", "lan_qwen", "claude_subagent"]
     assert router.chain_for("codex_astra", engines) == ["codex_astra", "agy_gemini_pro", "agy_claude_opus",
-                                                         "ollama_qwen", "claude_subagent"]
+                                                         "ollama_qwen", "lan_qwen", "claude_subagent"]
 
 
 def test_run_resolves_auto_models_offline_on_dry_run_and_logs_spec(project, engines, monkeypatch, tmp_path):
@@ -281,3 +282,42 @@ def test_run_resolves_auto_models_offline_on_dry_run_and_logs_spec(project, engi
     assert seen[-1]["offline"] is False
     head = pathlib.Path(res["paths"]["log"]).read_text(encoding="utf-8").splitlines()[0]
     assert "model=gemini-4-argon-high (auto:gemini)" in head  # the log says which model really ran
+
+
+def test_shipped_lan_qwen_uses_a_slim_codex_home_and_no_effort(tmp_path, monkeypatch):
+    engines = router.load_engines(REPO / "engines.json")
+    lan = engines["lan_qwen"]
+    assert "lan_qwen" in router.available_engines(engines)          # on by default; its live probe decides
+    monkeypatch.setattr(runner, "IS_WINDOWS", False)
+    cmd = runner.build_command(lan, tmp_path / "p.md", tmp_path, tmp_path / "last.md")
+    assert "--oss" not in cmd and cmd[cmd.index("-m") + 1] == "qwen3.8-flash-next-iq2_xs"
+    assert not any(a.startswith("model_reasoning_effort") for a in cmd)   # LAN server takes no effort
+    env = runner._env(lan)
+    assert env["CODEX_HOME"].endswith(".codex-local") and not env["CODEX_HOME"].startswith("~")
+
+
+def test_windows_sandbox_applies_only_on_windows(tmp_path, monkeypatch):
+    eng = {"runner": "codex", "model": "m", "windows_sandbox": "danger-full-access"}
+    monkeypatch.setattr(runner, "IS_WINDOWS", True)
+    cmd = runner.build_command(eng, tmp_path / "p.md", tmp_path, tmp_path / "l.md")
+    assert cmd[cmd.index("-s") + 1] == "danger-full-access"
+    monkeypatch.setattr(runner, "IS_WINDOWS", False)
+    cmd = runner.build_command(eng, tmp_path / "p.md", tmp_path, tmp_path / "l.md")
+    assert cmd[cmd.index("-s") + 1] == "workspace-write"
+
+
+def test_run_passes_the_engine_env_to_the_engine(project, monkeypatch):
+    seen = {}
+
+    class P:
+        returncode = 0
+
+    def fake_run(cmd, **kw):
+        seen.update(kw["env"])
+        kw["stdout"].write("engine transcript " * 100)
+        return P()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    engines = {"lan": {"runner": "codex", "model": "m", "effort": "", "env": {"CODEX_HOME": "~/.codex-local"}}}
+    runner.run(project, "WP01", "lan", engines, project / "ops" / "work_packages.json")
+    assert seen["CODEX_HOME"].endswith(".codex-local")
