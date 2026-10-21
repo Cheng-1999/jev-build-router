@@ -142,6 +142,9 @@ PYTHONPATH="$JBR" python -m jbr --project . queue clean WP07         # after mer
 Each package gets a worktree on `jbr/<engine>/<WP>-<stamp>` from a pinned base, with `.venv`/`node_modules`
 symlinked in; the worker runs the engine, then the package's test command, records changed files and the
 test tail, and moves on. It never commits, pushes or reviews, and stops when the engine's probe fails.
+On Windows the links are directory junctions when symlinks need a privilege you lack (no Developer Mode), and
+a worktree path longer than 120 characters moves to `~/.jbr/runs/wt/<hash>/<WP>-<stamp>`: Git for Windows
+refuses worktree paths past ~210 characters, and the project's own files must still fit under MAX_PATH.
 
 ## Pre-review: open-code-review on local Qwen (opt-in, since 2026-10-18)
 

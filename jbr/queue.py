@@ -7,17 +7,20 @@ from starting. Any engine key works (`--engine`).
 
 Each package runs in its own git worktree on a new branch `jbr/<engine>/<WP>-<stamp>` cut from
 `base`, so unattended edits never touch the checkout people are working in. Untracked essentials
-the tests need (`.venv`, `node_modules`) are symlinked in. The worker never commits, never pushes,
-never reviews: it runs the engine, runs the package's test command, records the result and moves on.
-Review happens later, in a batch, by the commander (review_level.js on each worktree); `fix` puts a
-package back in the queue with the reviewer's fix file, in the same worktree.
+the tests need (`.venv`, `node_modules`) are symlinked in (a junction on Windows without the symlink
+privilege). The worker never commits, never pushes, never reviews: it runs the engine, runs the
+package's test command, records the result and moves on. Review happens later, in a batch, by the
+commander (review_level.js on each worktree); `fix` puts a package back in the queue with the
+reviewer's fix file, in the same worktree.
 
 Everything lives in the project's runs dir (jbr/paths.py): queue.json, worker.lock, worker.log and
-worktrees/. Nothing is written into the project's own tree; `git worktree add` records the worktree
-in the project's .git, which is git's own bookkeeping.
+worktrees/ (on Windows a long worktree path moves to <runs root>/wt/<hash>/, see _worktree_dir).
+Nothing is written into the project's own tree; `git worktree add` records the worktree in the
+project's .git, which is git's own bookkeeping.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -28,12 +31,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from jbr import paths, runner, state
+from jbr import paths, prereview, runner, state
 
 DEFAULT_ENGINE = "ollama_qwen"
 DEFAULT_LINKS = (".venv", "node_modules")
 PENDING, RUNNING, DONE, FAILED = "pending", "running", "done", "failed"
 TEST_TAIL_LINES = 15
+WIN_WORKTREE_MAX = 120  # chars; leaves ~140 for the project's own paths under Windows' MAX_PATH (260)
 
 
 def _now() -> str:
@@ -145,20 +149,60 @@ def _latest(items: list[dict], wp: str) -> dict:
 
 
 def _git(root: pathlib.Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout
+    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError(f"git {' '.join(args)}: exit {p.returncode}: {p.stderr.strip()}")
+    return p.stdout
+
+
+def _worktree_dir(root: pathlib.Path, name: str) -> pathlib.Path:
+    """<runs dir>/worktrees/<name>. On Windows a long one moves to <runs root>/wt/<hash>/<name>: the
+    project key repeats the project's whole path, Git for Windows refuses a worktree path past ~210
+    characters ("'$GIT_DIR' too big"), and the project's own files must still fit under MAX_PATH."""
+    wt = paths.project_dir(root) / "worktrees" / name
+    if os.name == "nt" and len(str(wt)) > WIN_WORKTREE_MAX:
+        wt = paths.runs_root() / "wt" / hashlib.sha1(paths.project_key(root).encode()).hexdigest()[:10] / name
+    return wt
 
 
 def _make_worktree(root: pathlib.Path, it: dict, links: tuple[str, ...]) -> tuple[str, str]:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     branch = f"jbr/{it['engine']}/{it['wp']}-{stamp}"
-    wt = paths.project_dir(root) / "worktrees" / f"{it['wp']}-{stamp}"
+    wt = _worktree_dir(root, f"{it['wp']}-{stamp}")
     wt.parent.mkdir(parents=True, exist_ok=True)
     _git(root, "worktree", "add", "-q", "-b", branch, str(wt), it["base"])
     for name in links:
         src, dst = root / name, wt / name
         if src.exists() and not dst.exists():
-            dst.symlink_to(src, target_is_directory=src.is_dir())
+            _link(src, dst)
     return str(wt), branch
+
+
+def _link(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """Symlink; on Windows without the symlink privilege (no Developer Mode) a directory junction,
+    which needs none, and a hard link (or copy) for a file."""
+    try:
+        dst.symlink_to(src, target_is_directory=src.is_dir())
+    except OSError:
+        if os.name != "nt":
+            raise
+        if src.is_dir():
+            import _winapi
+            _winapi.CreateJunction(str(src), str(dst))
+        else:
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
+
+
+def _unlink_links(wt: str, links: tuple[str, ...]) -> None:
+    """Remove the links we placed before `git worktree remove`, so nothing can follow one into the
+    main checkout's .venv / node_modules. Removing a symlink or junction leaves its target alone."""
+    for name in links:
+        p = pathlib.Path(wt) / name
+        if p.is_symlink() or p.is_junction():
+            os.unlink(p)
 
 
 def _changed(wt: str, links: tuple[str, ...] = DEFAULT_LINKS) -> list[str]:
@@ -290,13 +334,8 @@ def _acquire_worker(lock: pathlib.Path) -> bool:
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+    # not os.kill(pid, 0): on Windows signal 0 is CTRL_C_EVENT, and an unknown pid raises WinError 87
+    return prereview._pid_alive(pid)
 
 
 def spawn_worker(project: str | os.PathLike, global_args: list[str], work_args: list[str]) -> dict:
@@ -348,6 +387,7 @@ def clean(project: str | os.PathLike, wp: str, *, force: bool = False) -> dict:
                     capture_output=True, text=True).stdout.strip()
                 if unmerged:
                     raise ValueError(f"{wp}: branch {it['branch']} has commits not in HEAD; merge them, or --force")
+            _unlink_links(wt, DEFAULT_LINKS)
             _git(root, "worktree", "remove", "--force", wt)
         if it.get("branch"):
             subprocess.run(["git", "-C", str(root), "branch", "-D", it["branch"]], capture_output=True)

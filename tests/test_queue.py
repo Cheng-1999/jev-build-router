@@ -79,10 +79,12 @@ def test_worker_runs_each_package_in_its_own_worktree_and_never_touches_the_chec
     assert _git(root, "status", "--porcelain") == before and not (root / "wp01.py").exists()
     one = done[0]
     wt = pathlib.Path(one["worktree"])
-    assert wt.is_relative_to(paths.project_dir(root)) and (wt / "wp01.py").exists()
+    home = paths.project_dir(root) if os.name != "nt" else paths.runs_root()   # Windows: long paths move to runs/wt/
+    assert wt.is_relative_to(home) and (wt / "wp01.py").exists()
     assert one["branch"].startswith("jbr/ollama_qwen/WP01-") and one["branch"] in _git(root, "branch", "--list", "jbr/*")
     assert one["changed"] == ["wp01.py"]                                 # the .venv symlink is not engine work
-    assert (wt / ".venv").is_symlink() and one["tests"]["exit"] == 0 and "3 passed" in one["tests"]["tail"]
+    link = wt / ".venv"                                                  # a junction on Windows without the symlink privilege
+    assert (link.is_symlink() or link.is_junction()) and one["tests"]["exit"] == 0 and "3 passed" in one["tests"]["tail"]
     assert done[1]["tests"]["tail"] == "no test command"
     assert calls[0]["reports_dir"] == str(reports(root)) and calls[0]["tag"] == "q0"
     assert calls[0]["engine"] == "ollama_qwen" and calls[0]["root"] == one["worktree"]
@@ -172,6 +174,7 @@ def test_clean_force_discards(repo):
     r = queue.run_one(root, ENGINES, probe=lambda *a, **k: _Probe(), run_engine=_engine([]))
     queue.clean(root, "WP01", force=True)
     assert not pathlib.Path(r["worktree"]).exists() and queue.load(root) == []
+    assert (root / ".venv" / "marker").exists()                         # removing the link spared its target
 
 
 def test_drop_only_pending(repo):
