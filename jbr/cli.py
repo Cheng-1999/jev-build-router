@@ -497,7 +497,19 @@ def cmd_paths(a) -> int:
     return 0
 
 
+def _tolerant_console() -> None:
+    """Engine logs are UTF-8 (accents, emoji); a Windows console in a legacy code page (cp950, cp1252)
+    raised UnicodeEncodeError while printing a log tail. Replace unencodable characters instead."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_console()
     argv = _hoist_globals(list(sys.argv[1:] if argv is None else argv))
     a = _parser().parse_args(argv)
     return {"route": cmd_route, "run": cmd_run, "spawn": cmd_spawn, "wait": cmd_wait,

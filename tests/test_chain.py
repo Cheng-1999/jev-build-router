@@ -25,8 +25,8 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
 
 @pytest.fixture
 def all_engines():
-    """engines.json as shipped, cloud engines only: local Qwen off (its place in the chain has its own tests)."""
-    return router.load_engines(REPO / "engines.json", {"ollama_qwen": False})
+    """engines.json as shipped, cloud engines only: local and LAN Qwen off (their place in the chain has its own tests)."""
+    return router.load_engines(REPO / "engines.json", {"ollama_qwen": False, "lan_qwen": False})
 
 
 class FakeRun:
@@ -82,6 +82,7 @@ def test_reset_hints_from_real_transcripts_round_trip():
 
 
 def test_probe_commands_use_the_real_cli_flags(all_engines, monkeypatch):
+    monkeypatch.setattr(runner, "IS_WINDOWS", False)
     monkeypatch.setenv("JBR_AGY_BIN", "agy")
     monkeypatch.setenv("JBR_CODEX_BIN", "codex")
     assert state.probe_command(all_engines["agy_gemini_pro"]) == [
@@ -226,6 +227,8 @@ def test_cli_pick_prints_first_available(all_engines, monkeypatch, capsys):
     assert cli.main(["pick", "--exclude", "agy_claude_opus,codex_astra"]) == 0
     assert capsys.readouterr().out.strip() == "ollama_qwen"        # local Qwen before Claude's quota
     assert cli.main(["pick", "--exclude", "agy_claude_opus,codex_astra,ollama_qwen"]) == 0
+    assert capsys.readouterr().out.strip() == "lan_qwen"           # LAN Qwen next, still before Claude
+    assert cli.main(["pick", "--exclude", "agy_claude_opus,codex_astra,ollama_qwen,lan_qwen"]) == 0
     assert capsys.readouterr().out.strip() == "claude_subagent"
 
 
@@ -340,6 +343,7 @@ def test_route_passes_priority_and_live_status_and_writes_chains(project, packag
                                   {"engine": "codex_astra", "priority": 3, "live_status": "AVAILABLE"},
                                   # local Qwen switched off by the fixture: listed for context, never offered
                                   {"engine": "ollama_qwen", "priority": 4, "live_status": "UNAVAILABLE"},
+                                  {"engine": "lan_qwen", "priority": 4, "live_status": "UNAVAILABLE"},
                                   {"engine": "claude_subagent", "priority": 5, "live_status": "AVAILABLE"}]
     assert "live_status: EXHAUSTED until 2026-10-02T03:09:31Z" in st["engines"]["agy_gemini_pro"]
     assert "chain priority 1" in st["engines"]["agy_gemini_pro"]
@@ -379,7 +383,8 @@ def test_route_all_external_out_goes_to_claude_without_api(project, packages, al
 def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, capsys):
     """End to end through the CLI: live probes (mocked subprocess) feed Jev (mocked urlopen)."""
     replies = {"gemini-3.1-pro-high": (3, AGY_QUOTA_LOG), "claude-opus-5-5-high": (0, "READY"),
-               "gpt-6-astra": (0, "READY"), "qwen3.8:27b-mlx": (0, "READY.")}
+               "gpt-6-astra": (0, "READY"), "qwen3.8:27b-mlx": (0, "READY."),
+               "qwen3.8-flash-next-iq2_xs": (0, "READY")}
     probed = []
 
     def fake_run(cmd, **kw):
@@ -397,10 +402,11 @@ def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, ca
     monkeypatch.setenv("TYPESAFE_API_KEY", "k-test")
     assert cli.main(["--project", str(project), "route"]) == 0
     out, err = capsys.readouterr()
-    assert sorted(probed) == ["claude-opus-5-5-high", "gemini-3.1-pro-high", "gpt-6-astra", "qwen3.8:27b-mlx"]
+    assert sorted(probed) == ["claude-opus-5-5-high", "gemini-3.1-pro-high", "gpt-6-astra",
+                              "qwen3.8-flash-next-iq2_xs", "qwen3.8:27b-mlx"]
     assert "agy_gemini_pro: EXHAUSTED" in err
     assert "agy_gemini_pro" not in next(iter(captured["body"]["questions"].values()))["criteria"]
-    assert router.load_chains(project) == {wp: ["agy_claude_opus", "codex_astra", "ollama_qwen", "claude_subagent"]
+    assert router.load_chains(project) == {wp: ["agy_claude_opus", "codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"]
                                            for wp in ("WP01", "WP02", "WP03")}
     doc = json.loads(paths.routing_path(project).read_text(encoding="utf-8"))
     assert doc["availability"]["agy_gemini_pro"]["status"] == "EXHAUSTED"
@@ -433,7 +439,7 @@ def test_build_dag_auto_is_default_and_walks_the_chain():
                          "impl:WP01:codex_astra:fallback", "review:WP01:r1"]
     assert "impl:WP01:fallback" not in calls  # claude_subagent not needed
     row = out["result"][0]
-    assert row["chain"] == ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "ollama_qwen", "claude_subagent"]
+    assert row["chain"] == ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"]
     assert row["engine"] == "agy_gemini_pro" and row["final"] == "accept"
     assert [(t["engine"], t["status"]) for t in row["history"][0]["engines"]] == [
         ("agy_gemini_pro", "quota"), ("agy_claude_opus", "quota"), ("codex_astra", "ok")]
@@ -486,9 +492,9 @@ def test_build_dag_routing_accepts_string_pin_list_and_auto():
     rc, out = run_workflow(BUILD_DAG, dict(JBR, packages=pk, routing=routing))
     assert rc == 0
     chains = {r["wp"]: r["chain"] for r in out["result"]}
-    assert chains == {"WP01": ["codex_astra", "ollama_qwen", "claude_subagent"],   # pin, then the chain after it
+    assert chains == {"WP01": ["codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"],   # pin, then the chain after it
                       "WP02": ["agy_claude_opus", "claude_subagent"],              # list from routing.json .chains
-                      "WP03": ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "ollama_qwen", "claude_subagent"],
+                      "WP03": ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"],
                       "WP04": ["claude_subagent"]}
     assert "impl:WP04" in out["calls"] and "impl:WP02:agy_claude_opus" in out["calls"]
 
@@ -516,7 +522,7 @@ def test_build_dag_whole_chain_dead_is_blocked_without_review():
 
 def test_build_dag_waits_longer_for_local_qwen():
     src = BUILD_DAG.read_text(encoding="utf-8")
-    assert "const ENGINE_WAITS = Object.assign({ ollama_qwen: 16 }, A.engineWaits || {})" in src
+    assert "const ENGINE_WAITS = Object.assign({ ollama_qwen: 16, lan_qwen: 16 }, A.engineWaits || {})" in src
     assert "up to ${ENGINE_WAITS[eng] || 8} times" in src and "No marker after ${ENGINE_WAITS[eng] || 8} waits" in src
 
 
@@ -538,3 +544,17 @@ def test_build_dag_requires_reports_dir_for_external_engines_and_passes_it_to_jb
 def test_build_dag_absolute_dirs_are_not_joined_onto_the_root():
     src = BUILD_DAG.read_text(encoding="utf-8")
     assert "const specPath = id => under(PROMPTS," in src and "${under(extraFile)}" in src
+
+
+def test_probe_of_an_engine_with_env_runs_with_that_env(monkeypatch):
+    monkeypatch.setenv("JBR_CODEX_BIN", "codex")
+    engines = router.load_engines(REPO / "engines.json")
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"], seen["env"] = cmd, kw.get("env")
+        return subprocess.CompletedProcess(cmd, 0, "READY", "")
+
+    assert state.probe("lan_qwen", engines, run=fake_run).status == state.AVAILABLE
+    assert seen["cmd"][seen["cmd"].index("-m") + 1] == "qwen3.8-flash-next-iq2_xs"
+    assert seen["env"]["CODEX_HOME"].endswith(".codex-local")

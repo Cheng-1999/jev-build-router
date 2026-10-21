@@ -21,8 +21,8 @@
 //   routing: { WP04: 'claude_subagent',       // pin: that engine first, then the engineChain entries after it
 //              WP05: ['agy_gemini_pro', 'codex_astra', 'claude_subagent'],  // explicit chain (ops/routing.json .chains)
 //              WP06: 'auto' },                // or no entry at all (the DEFAULT): walk engineChain
-//   engineChain: ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', 'claude_subagent'],  // default priority order
-//   engineWaits: { ollama_qwen: 16 },          // 8.75-minute marker waits per engine before CRASH (default 8 = ~70 min; local Qwen 16)
+//   engineChain: ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', 'lan_qwen', 'claude_subagent'],  // default priority order
+//   engineWaits: { ollama_qwen: 16 },          // 8.75-minute marker waits per engine before CRASH (default 8 = ~70 min; local/LAN Qwen 16)
 //   engineArgs: { agy_gemini_pro: '--timeout 55m' },   // extra `python -m jbr spawn` args per engine (optional)
 //   jbrArgs: '--engines /c/path/engines.json',          // global jbr options for probe + spawn (optional)
 //   fallbackEngine: 'claude_subagent',        // appended to every chain as the last resort (default claude_subagent)
@@ -72,9 +72,9 @@ const ENGINE_ARGS = A.engineArgs || {}
 const JBR_ARGS = (A.jbrArgs ? ' ' + A.jbrArgs : '') + (REPORTS ? ` --reports "${REPORTS}"` : '')
 const RUN_PREFIX = 'run'
 const LAST_RESORT = 'claude_subagent'
-const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', LAST_RESORT]
+const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', 'lan_qwen', LAST_RESORT]
 const ENGINE_CHAIN = Array.isArray(A.engineChain) && A.engineChain.length ? A.engineChain : DEFAULT_CHAIN
-const ENGINE_WAITS = Object.assign({ ollama_qwen: 16 }, A.engineWaits || {})
+const ENGINE_WAITS = Object.assign({ ollama_qwen: 16, lan_qwen: 16 }, A.engineWaits || {})
 const FALLBACK = A.fallbackEngine || LAST_RESORT
 const PRE = A.preReview ? Object.assign({ rounds: 'first', effort: 'low', budgetMin: 45 }, A.preReview === true ? {} : A.preReview) : null
 const PRE_WAITS = PRE ? Math.ceil(PRE.budgetMin / 8.5) + 1 : 0   // jbr enforces the budget, so the marker always comes

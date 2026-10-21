@@ -27,6 +27,7 @@ from typing import Any
 from jbr import models, paths
 
 RUN_PREFIX = "run"
+IS_WINDOWS = os.name == "nt"  # module constant so tests can flip it
 DEFAULT_TIMEOUT = "55m"
 DEFAULT_RULES = (
     "Rules: do NOT modify files owned by other work packages except to append exports. Do not commit to git. "
@@ -150,12 +151,17 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
         return None
     if runner == "codex":
         # OpenAI Codex CLI. workspace-write sandbox keeps it inside the repo.
-        cmd = ["codex", "exec", "-s", "workspace-write", "--skip-git-repo-check", "-m", model,
-               "-c", f"model_reasoning_effort={effort}", "-C", str(project_root),
-               "-o", str(last_file), pointer]
+        # `windows_sandbox`: on Windows the workspace-write shell can fail with "CryptUnprotectData
+        # failed" (DPAPI); engines.json may name the sandbox to use there instead.
+        sandbox = engine.get("windows_sandbox", "workspace-write") if IS_WINDOWS else "workspace-write"
+        cmd = ["codex", "exec", "-s", sandbox, "--skip-git-repo-check", "-m", model]
+        if effort:  # empty effort: provider without reasoning effort (e.g. a LAN OpenAI-compatible server)
+            cmd += ["-c", f"model_reasoning_effort={effort}"]
+        cmd += ["-C", str(project_root), "-o", str(last_file), pointer]
         if engine.get("local_provider"):
             # local model (ollama | lmstudio) through codex's own OSS provider: same sandbox, no quota
             cmd[2:2] = ["--oss", "--local-provider", engine["local_provider"]]
+        # a LAN OpenAI-compatible server is configured in its own slim CODEX_HOME instead (engines.json `env`)
         return cmd
     if runner == "agy":
         cmd = ["agy", "-p", pointer, "--model", model, "--dangerously-skip-permissions", "--print-timeout", timeout]
@@ -208,8 +214,15 @@ def engine_status(done: dict | None) -> str | None:
     return "crash" if done["exit"] == -1 else "ok"
 
 
-def _env() -> dict[str, str]:
-    return dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+def _env(engine: dict | None = None) -> dict[str, str]:
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    env.update(engine_env(engine))
+    return env
+
+
+def engine_env(engine: dict | None) -> dict[str, str]:
+    """engines.json `env`: per-engine variables (`~` expanded), e.g. CODEX_HOME for lan_qwen's slim codex home."""
+    return {k: os.path.expanduser(str(v)) for k, v in ((engine or {}).get("env") or {}).items()}
 
 
 # ----------------------------------------------------------------------------- run / spawn / wait
@@ -264,7 +277,7 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
             fh.flush()
             # stdin closed: `codex exec` reads stdin when it is not a TTY and would wait forever on an
             # inherited pipe (2026-10-10, a foreground `jbr queue work`)
-            p = subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, env=_env())
+            p = subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, env=_env(engine))
         dt = (time.time() - t0) / 60
         status, hint = classify_run(p.returncode, dt, paths["log"].read_text(encoding="utf-8", errors="replace"))
         paths["done"].write_text(f"{p.returncode} {dt:.1f}min {status}{' ' + hint if hint else ''}\n", encoding="utf-8")

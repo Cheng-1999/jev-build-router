@@ -100,7 +100,7 @@ def test_route_single_available_engine_skips_api(project, packages, engines, mon
     monkeypatch.setattr(router.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no API")))
     eng = router.load_engines(router.pathlib.Path(__file__).resolve().parents[1] / "engines.json",
                               {"agy_gemini_pro": False, "agy_claude_opus": False, "codex_astra": False,
-                               "ollama_qwen": False})
+                               "ollama_qwen": False, "lan_qwen": False})
     doc = router.route(project, packages, eng, write=False)
     assert all(r["engine"] == "claude_subagent" for r in doc["routing"].values())
     assert not paths.routing_path(project).exists()

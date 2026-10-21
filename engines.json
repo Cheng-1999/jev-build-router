@@ -27,13 +27,14 @@
     "priority": 1
   },
   "codex_astra": {
-    "description": "OpenAI Codex CLI on gpt-6-astra, effort high, can spawn its own subagents. Usage limits hit easily; third model family, useful diversity for review-heavy or late packages.",
+    "description": "OpenAI Codex CLI on gpt-6-astra, effort high, can spawn its own subagents. Usage limits hit easily; third model family, useful diversity for review-heavy or late packages. 2026-10-14 (Windows): the workspace-write shell failed with \"CryptUnprotectData failed\" (DPAPI); windows_sandbox danger-full-access fixed it.",
     "runner": "codex",
     "model": "gpt-6-astra",
     "effort": "high",
     "parallel_limit": 2,
     "available": true,
-    "priority": 3
+    "priority": 3,
+    "windows_sandbox": "danger-full-access"
   },
   "ollama_qwen": {
     "description": "Local Qwen 3.8 27B (MLX) on Ollama, driven by the Codex CLI (--oss). Free, private, never quota-limited; only where Ollama runs (the Mac; elsewhere its probe fails and the chain skips it). Slow: codex sends ~140k tokens of context, so even a trivial package takes several minutes, and a 27B model is weaker than the cloud engines on multi-file work. In the chain after Codex and before the Claude subagent, so it takes work before Claude quota is spent; best for small, fully specified packages. Runners wait up to ~140 min for it.",
@@ -41,6 +42,19 @@
     "local_provider": "ollama",
     "model": "qwen3.8:27b-mlx",
     "effort": "high",
+    "parallel_limit": 1,
+    "available": true,
+    "priority": 4
+  },
+  "lan_qwen": {
+    "description": "Qwen 3.8 Flash Next (IQ2_XS 2-bit quant, 32K context) on a LAN OpenAI-compatible server (Responses API), driven by the Codex CLI through a slim CODEX_HOME (~/.codex-local: provider only, no plugins/skills/MCP, so codex's base prompt is ~9K tokens instead of ~108K). Free, never quota-limited; needs LOCAL_LLM_KEY and the server up (otherwise its probe fails and the chain skips it). 2026-10-21: 'say hi' round trip 12 s; benchmark package (two pure text helpers, 8 numbered behaviours, slugify with accent stripping) done in 2.3 min, exit 0, its 9 tests green and 10/10 independent spec checks passed, zero defects. One small package only: no evidence yet on multi-file work. A 2-bit model with ~23K usable tokens: only small, fully specified, low-risk packages. Fourth model family, so the Claude reviewers catch its errors.",
+    "runner": "codex",
+    "model": "qwen3.8-flash-next-iq2_xs",
+    "effort": "",
+    "env": {
+      "CODEX_HOME": "~/.codex-local"
+    },
+    "windows_sandbox": "danger-full-access",
     "parallel_limit": 1,
     "available": true,
     "priority": 4

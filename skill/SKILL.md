@@ -25,6 +25,7 @@ agy is the base worker. Every implement/fix step prefers, in order:
 2. `agy_claude_opus` (agy, `auto:claude-opus`, e.g. claude-opus-5-5-high; shares ONE Claude quota bucket with any other agy Claude model, e.g. Sonnet)
 3. `codex_astra` (codex, gpt-6-astra; flags `-s workspace-write`, there is no `--full-auto`)
 4. `ollama_qwen` (local Qwen 3.8 27B on Ollama, driven by codex `--oss --local-provider ollama`; free, never quota-limited)
+4. `lan_qwen` (Qwen on a LAN OpenAI-compatible server, codex with `CODEX_HOME=~/.codex-local`; free, never quota-limited, 2-bit/32K so small packages only; same priority as `ollama_qwen`, after it)
 5. `claude_subagent` (Claude Code workflow subagent; last resort, never quota-probed)
 
 **Local Qwen saves Claude quota (user rule, 2026-10-10).** It is in every default chain before the Claude subagent, so a package whose cloud engines are all out of quota goes to Qwen first. It exists only where Ollama runs (the Mac): elsewhere its probe fails and the chain skips it. It is slow (codex sends ~140k tokens of context: several minutes even for a trivial package; build_dag runners wait up to ~140 min for it instead of ~70) and weaker than the cloud engines on multi-file work. Assign it directly for small, fully specified, low-risk packages. Its probe asks Ollama directly (`ollama run --think=false <m> "Reply only READY."`), seconds, not codex. Do not run the local Clef 27B server while Qwen is building: both are ~17 GB.

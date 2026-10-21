@@ -381,8 +381,9 @@ def probe(engine_key: str, engines: dict[str, dict], *, live: bool = True, now: 
             return hit
         try:
             cmd = probe_command(eng)  # may list agy models (auto:<family>); failures -> UNAVAILABLE below
+            kw = {"env": dict(os.environ, **runner.engine_env(eng))} if eng.get("env") else {}
             proc = run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=PROBE_TIMEOUT_S, stdin=subprocess.DEVNULL, cwd=str(p.parent) if p.parent.exists() else None)
+                       timeout=PROBE_TIMEOUT_S, stdin=subprocess.DEVNULL, cwd=str(p.parent) if p.parent.exists() else None, **kw)
             rc, out = proc.returncode, (proc.stdout or "") + "\n" + (proc.stderr or "")
         except subprocess.TimeoutExpired as e:
             rc, out = None, ((e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or ""))
