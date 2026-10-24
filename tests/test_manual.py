@@ -407,3 +407,30 @@ def test_done_from_exact_tagged_id_and_filter(project, all_engines, capsys):
 def test_handoff_missing_packages_file_exits_cleanly(tmp_path, capsys):
     assert cli.main(["--project", str(tmp_path), "handoff", "--pending"]) == 2
     assert cli.main(["--project", str(tmp_path), "handoff", "WP01"]) == 2
+
+
+def test_inbox_lists_open_checklists_across_projects(tmp_path, all_engines, capsys):
+    import shutil
+    from tests.conftest import PACKAGES
+    projects = []
+    for name in ("app-a", "app-b"):
+        p = tmp_path / name
+        (p / "ops" / "prompts").mkdir(parents=True)
+        (p / "ops" / "work_packages.json").write_text(json.dumps(PACKAGES), encoding="utf-8")
+        _route(p, {"WP01": "agy_manual"})
+        runner.handoff_pending(p, all_engines, _pk(p), routing=router.load_routing(p))
+        projects.append(p)
+    runner.mark_done(projects[1], "WP01", minutes=1)  # app-b's checklist is finished: stale
+    rows = {pathlib_name(r["project"]): r for r in runner.inbox()}
+    assert rows["app-a"]["open"] == ["WP01"] and rows["app-b"]["open"] == []
+    assert "handoff-pending.md" in rows["app-a"]["pointer"]
+    assert cli.main(["inbox"]) == 0
+    out = capsys.readouterr().out
+    assert "app-a: 1 open (WP01)" in out and "app-b" not in out and "1 finished checklist not shown" in out
+    shutil.rmtree(tmp_path / "jbr-runs")
+    assert cli.main(["inbox"]) == 0 and "inbox empty" in capsys.readouterr().out
+
+
+def pathlib_name(p):
+    import pathlib
+    return pathlib.Path(p).name
