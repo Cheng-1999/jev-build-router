@@ -115,6 +115,31 @@ PYTHONPATH="$JBR" python -m jbr handoff WP05 --tag fix1 --extra-file <reports>/f
 PYTHONPATH="$JBR" python -m jbr done WP05 --tag fix1                    # then review_level.js again with logTag 'fix1'
 ```
 
+**Several packages in one agy session (`--pending`).** One checklist covers every package assigned to a manual
+engine with no recorded outcome, plus every open fix-round handoff, in dependency order:
+
+```
+PYTHONPATH="$JBR" python -m jbr assign WP01=agy_manual WP02=agy_manual WP03=agy_manual
+PYTHONPATH="$JBR" python -m jbr handoff --pending            # writes <reports>/handoff-pending.md, prints the line to paste
+PYTHONPATH="$JBR" python -m jbr handoff --pending --print    # or the checklist with every packet inlined
+#   ... one agy session you start works through them in order and prints a block per package:
+#       === REPORT WP01 ===  status: done|failed  tests: ...  files: ...  unsatisfied: ...  === END WP01 ===
+#   save that session's output to a file, then:
+PYTHONPATH="$JBR" python -m jbr done --from agy-session.txt   # status: done -> OK, anything else -> CRASH; block = notes
+```
+
+New packages get their packet. Packets already handed off are reused as they are, keeping their start time and
+fix instructions, and a package with an open fix round gets no new round-0 packet. Rerun `--pending` at any
+time: it lists only what is still open, and deletes the checklist once nothing is. Each entry gives the exact REPORT ID to use (`WP03-fix1` for a fix round). A bare `REPORT WP03`
+is recorded against WP03's one open fix round when round 0 is already recorded. Otherwise it is refused, and a
+recorded outcome is never overwritten without `--force`. A package whose dependency is not built yet gets no
+packet and is listed under NOT YET. A dependency counts as built when it is earlier on the checklist, has an OK
+run, or is passed with `--done WP..`: use that for packages a Claude subagent built, since those leave no run
+marker. Blocking carries down the dependency chain, and fix rounds are never blocked. `done --from` records
+every block it finds (pass ids to limit it). Ids with no block stay open, and a recorded CRASH has to be handed
+off again explicitly. In a batch, each package's minutes are measured from its own `handoff`, so later
+packages show the time spent on earlier ones as well.
+
 - runner `manual`: `run`, `spawn` and `queue add` refuse it (exit 2, before any marker is written). `probe` answers
   `UNAVAILABLE manual: ...` without calling anything. `pick`, `route` (Jev never sees it) and every chain skip it.
   Only an explicit `assign WP=agy_manual` or a `build_dag.js` routing pin hands work to it.

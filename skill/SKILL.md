@@ -55,6 +55,11 @@ the line they paste into an agy session they start themselves; they run `jbr don
 when it finishes. Review with `review_level.js` ONLY when `done` recorded OK, then `compose-fix`. For
 CRASH/QUOTA there is no engine work: hand it off again (same round), or pass `engineStatus: {WP: 'quota'}`. A fix round is
 `handoff <WP> --tag fix<N> --extra-file <fix file>`, then `done <WP> --tag fix<N>`, then review with `logTag`.
+Several at once: `jbr handoff --pending` writes one checklist, ordered by dependencies, covering every
+outstanding manual package and open fix round. The user pastes its pointer line into one agy session they
+start. agy prints a `=== REPORT <id> ===` block per package, and the user saves the output and runs
+`jbr done --from <file>`. Offer this when two or more packages are assigned to `agy_manual`. Never automate
+the pickup: no timer, loop or watcher that starts agy on the checklist.
 In `build_dag.js` a manual-pinned package returns `final: 'manual'` (with its `handoff` command) and its
 dependents return `'waiting'`: tell the user which packets to run, then stop. Do not poll, and do not
 spawn agy "to help".

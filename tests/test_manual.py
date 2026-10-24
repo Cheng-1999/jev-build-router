@@ -243,3 +243,167 @@ def test_shipped_engines_keep_automated_agy_off(all_engines):
     assert not all_engines["agy_gemini_pro"]["available"] and not all_engines["agy_claude_opus"]["available"]
     assert state.probe("agy_gemini_pro", all_engines).line() == "UNAVAILABLE disabled (available=false / --available no)"
     assert not any(k.startswith("agy") for k in router.usable_engines(all_engines))
+
+
+# ----------------------------------------------------------------------------- handoff --pending / done --from
+
+AGY_OUTPUT = """agy> working on WP01 ...
+=== REPORT WP01 ===
+status: done
+tests: 4 passed in 0.2s
+files: src/demo/core.py, tests/test_core.py
+unsatisfied: none
+=== END WP01 ===
+some chatter
+=== REPORT WP02 ===
+status: failed
+tests: 1 failed
+files: src/demo/ledger.py
+unsatisfied: signature check
+=== END WP02 ===
+"""
+
+
+def _route(project, mapping):
+    from jbr import paths
+    paths.routing_path(project).parent.mkdir(parents=True, exist_ok=True)
+    paths.routing_path(project).write_text(json.dumps({"routing": {k: {"engine": v} for k, v in mapping.items()}}),
+                                           encoding="utf-8")
+
+
+def test_pending_collects_manual_packages_in_dependency_order(project, all_engines):
+    _route(project, {"WP03": "agy_manual", "WP01": "agy_manual", "WP02": "agy_manual"})
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project), now=500.0)
+    assert [(i["wp"], i["existing"]) for i in res["items"]] == [("WP01", False), ("WP02", False), ("WP03", False)]
+    text = (reports(project) / "handoff-pending.md").read_text(encoding="utf-8")
+    assert text.startswith("You have 3 work packages to do, ONE AT A TIME")
+    assert text.index("1. WP01") < text.index("2. WP02") < text.index("3. WP03") and "(depends on WP01, WP02)" in text
+    assert "REPORT ID: WP03" in text and str(reports(project) / "run-WP01.prompt.md") in text
+    assert str(reports(project) / "handoff-pending.md") in res["pointer"]
+    assert runner.read_handoff(project, "WP03")["started"] == 500.0
+
+
+def test_pending_blocks_packages_whose_dependency_is_not_built(project, all_engines):
+    _route(project, {"WP01": "agy_manual", "WP02": "codex_astra", "WP03": "agy_manual"})
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project))
+    assert [i["wp"] for i in res["items"]] == ["WP01"]
+    assert [(i["wp"], i["blocked_on"]) for i in res["blocked"]] == [("WP03", ["WP02"])]
+    assert "NOT YET" in res["text"] and "- WP03: waits on WP02" in res["text"]
+    assert runner.read_handoff(project, "WP03") is None  # no packet for a blocked package
+    # WP02 built by codex (OK marker) or declared done -> WP03 is ready
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project), done={"WP02"})
+    assert [i["wp"] for i in res["items"]] == ["WP01", "WP03"]
+    reports(project).joinpath("run-WP02.done").write_text("0 4.0min OK\n", encoding="utf-8")
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project))
+    assert [i["wp"] for i in res["items"]] == ["WP01", "WP03"] and not res["blocked"]
+
+
+def test_pending_blocks_transitively_after_a_crash(project, all_engines):
+    _route(project, {"WP01": "agy_manual", "WP02": "agy_manual", "WP03": "agy_manual"})
+    runner.handoff(project, "WP01", "agy_manual", all_engines, _pk(project))
+    runner.mark_done(project, "WP01", status="CRASH", minutes=1)
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project))
+    assert res["items"] == [] and [(i["wp"], i["blocked_on"]) for i in res["blocked"]] == [("WP02", ["WP01"]), ("WP03", ["WP01", "WP02"])]
+
+
+def test_pending_reuses_open_handoffs_and_drops_finished_ones(project, all_engines):
+    _route(project, {"WP01": "agy_manual", "WP03": "agy_manual"})
+    runner.handoff(project, "WP01", "agy_manual", all_engines, _pk(project), now=100.0)
+    runner.handoff(project, "WP03", "agy_manual", all_engines, _pk(project), extra="FIX ROUND 1: x", tag="fix1", now=100.0)
+    runner.mark_done(project, "WP01", minutes=1)
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project), now=900.0)
+    # WP01 finished; WP03's open fix-round handoff kept as it is (no fresh round-0 packet while a fix is open)
+    assert [(i["wp"], i["tag"], i["existing"]) for i in res["items"]] == [("WP03", "fix1", True)]
+    assert res["blocked"] == []  # WP03 depends on unbuilt WP02, but a fix round works on code that exists
+    assert runner.read_handoff(project, "WP03", "fix1")["started"] == 100.0
+    assert "FIX ROUND 1: x" in (reports(project) / "run-WP03-fix1.prompt.md").read_text(encoding="utf-8")
+    assert "1. WP03-fix1" in res["text"]
+
+
+def test_pending_with_nothing_to_do_removes_the_checklist(project, all_engines):
+    _route(project, {"WP01": "agy_manual"})
+    runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project))
+    runner.mark_done(project, "WP01", minutes=1)
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project))
+    assert res["items"] == [] and not (reports(project) / "handoff-pending.md").exists()
+
+
+def test_pending_inline_contains_every_packet(project, all_engines):
+    _route(project, {"WP01": "agy_manual", "WP02": "agy_manual"})
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project), inline=True)
+    assert "######## PACKET WP01 ########" in res["text"] and "######## END PACKET WP02 ########" in res["text"]
+    assert "work package WP02" in res["text"] and "packet: " not in res["text"]
+
+
+def test_parse_reports_maps_status():
+    r = runner.parse_reports(AGY_OUTPUT)
+    assert r["WP01"]["status"] == "OK" and "4 passed" in r["WP01"]["notes"]
+    assert r["WP02"]["status"] == "CRASH"
+    assert runner.parse_reports("=== REPORT WP09 ===\nno status line\n=== END WP09 ===")["WP09"]["status"] == "CRASH"
+    assert runner.parse_reports("=== REPORT WP09 ===\nstatus: done\n(no end marker)") == {}
+
+
+def test_cli_pending_then_done_from_round_trip(project, capsys):
+    base = ["--project", str(project)]
+    assert cli.main(base + ["assign", "WP01=agy_manual", "WP02=agy_manual", "--no-probe"]) == 0
+    capsys.readouterr()
+    assert cli.main(base + ["handoff", "--pending"]) == 0
+    out = capsys.readouterr().out
+    assert "2 pending" in out and "1. WP01 on agy_manual  (new packet)" in out and "done --from" in out
+    agy = project.parent / "agy-session.txt"
+    agy.write_text(AGY_OUTPUT, encoding="utf-8")
+    assert cli.main(base + ["done", "--from", str(agy), "--minutes", "12"]) == 0
+    out = capsys.readouterr().out
+    assert "WP01: agy_manual OK exit=0 12.0min" in out and "WP02: agy_manual CRASH exit=1 12.0min" in out
+    assert "4 passed in 0.2s" in (reports(project) / "run-WP01.log").read_text(encoding="utf-8")
+    assert cli.main(base + ["handoff", "--pending"]) == 0
+    assert "nothing ready" in capsys.readouterr().out  # WP02 has an outcome (CRASH): re-hand it off explicitly
+
+
+def test_cli_pending_and_done_argument_errors(project, capsys):
+    base = ["--project", str(project)]
+    assert cli.main(base + ["handoff"]) == 2
+    assert cli.main(base + ["handoff", "WP01", "--pending"]) == 2
+    assert cli.main(base + ["done"]) == 2
+    assert cli.main(base + ["done", "WP01", "WP02", "--notes", "x"]) == 2
+    empty = project.parent / "empty.txt"
+    empty.write_text("no blocks here", encoding="utf-8")
+    assert cli.main(base + ["done", "--from", str(empty)]) == 2
+    assert cli.main(base + ["done", "--from", str(project / "missing.txt")]) == 2
+
+
+def test_report_parsing_tolerates_markdown_and_tight_markers():
+    r = runner.parse_reports("=== REPORT WP01===\nstatus: **done**\n=== END WP01===\n"
+                             "== REPORT WP02 ==\nstatus: `done`\n== END WP02 ==")
+    assert r["WP01"]["status"] == "OK" and r["WP02"]["status"] == "OK"
+
+
+def test_done_from_maps_a_bare_id_to_its_open_fix_round(project, all_engines, capsys):
+    runner.handoff(project, "WP01", "agy_manual", all_engines, _pk(project))
+    runner.mark_done(project, "WP01", minutes=1)
+    runner.handoff(project, "WP01", "agy_manual", all_engines, _pk(project), tag="fix1", extra="fix it")
+    out = project.parent / "agy.txt"
+    out.write_text("=== REPORT WP01 ===\nstatus: done\ntests: 5 passed\n=== END WP01 ===\n", encoding="utf-8")
+    assert cli.main(["--project", str(project), "done", "--from", str(out), "--minutes", "3"]) == 0
+    o = capsys.readouterr().out
+    assert "WP01-fix1: agy_manual OK" in o and "args.logTag: 'fix1'" in o
+    assert runner.read_done(project, "WP01")["minutes"] == 1.0  # round 0 untouched
+    # nothing open any more: the same report is refused, never --force-suggested
+    assert cli.main(["--project", str(project), "done", "--from", str(out)]) == 2
+    err = capsys.readouterr().err
+    assert "--force" not in err
+
+
+def test_done_from_exact_tagged_id_and_filter(project, all_engines, capsys):
+    runner.handoff(project, "WP01", "agy_manual", all_engines, _pk(project))
+    runner.mark_done(project, "WP01", minutes=1)
+    runner.handoff(project, "WP01", "agy_manual", all_engines, _pk(project), tag="fix1")
+    out = project.parent / "agy.txt"
+    out.write_text("=== REPORT WP01-fix1 ===\nstatus: done\n=== END WP01-fix1 ===\n", encoding="utf-8")
+    assert cli.main(["--project", str(project), "done", "--from", str(out), "WP01-fix1"]) == 0
+    assert runner.read_done(project, "WP01", "fix1")["status"] == "OK"
+
+
+def test_handoff_missing_packages_file_exits_cleanly(tmp_path, capsys):
+    assert cli.main(["--project", str(tmp_path), "handoff", "--pending"]) == 2
+    assert cli.main(["--project", str(tmp_path), "handoff", "WP01"]) == 2

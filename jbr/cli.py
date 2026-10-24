@@ -148,16 +148,22 @@ def _parser() -> argparse.ArgumentParser:
     pv.add_argument("--dry-run", action="store_true", help="print scope and argv; never run ocr")
 
     ho = sub.add_parser("handoff", help="manual engine: write the packet for a package YOU run (e.g. in agy); executes nothing")
-    ho.add_argument("wp_id")
+    ho.add_argument("wp_id", nargs="?", help="the package (omit with --pending)")
+    ho.add_argument("--pending", action="store_true",
+                    help="every package assigned to a manual engine and not finished, plus open fix handoffs: one checklist")
+    ho.add_argument("--done", nargs="*", default=[], metavar="WP",
+                    help="with --pending: dependencies already built elsewhere (e.g. by a Claude subagent: no run marker)")
     ho.add_argument("--engine", default=None, help="manual engine key (default: from routing.json, else agy_manual)")
     ho.add_argument("--extra", default="", help="additional manager instructions")
     ho.add_argument("--extra-file", default=None, help="file with additional instructions (e.g. fix-WP-round1.md)")
     ho.add_argument("--tag", default="", help="e.g. fix1 for fix round 1 (keeps round 0's packet and log)")
     ho.add_argument("--print", dest="print_prompt", action="store_true",
-                    help="print the whole packet instead of the pointer line (pipe to pbcopy / clip)")
+                    help="print the whole packet (with --pending: the checklist with every packet inlined) instead of the pointer line")
 
     dn = sub.add_parser("done", help="manual engine: record the outcome of a handed-off package (.done marker)")
-    dn.add_argument("wp_id")
+    dn.add_argument("wp_ids", nargs="*", help="packages to record (with --from: only these; default every report found)")
+    dn.add_argument("--from", dest="from_file", default=None,
+                    help="file with the engine's output: each === REPORT <id> === block marks <id> done (status: done -> OK, else CRASH)")
     dn.add_argument("--tag", default="")
     dn.add_argument("--status", default="OK", type=str.upper, choices=["OK", "CRASH", "QUOTA"],
                     help="OK = the engine did the work (gets reviewed); CRASH/QUOTA = it did nothing usable")
@@ -307,7 +313,7 @@ def cmd_pick(a) -> int:
 
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
 # sub-options that take one value: the token after them is a VALUE, never a global option
-VALUE_OPTS = {"--status", "--exit", "--minutes", "--notes", "--notes-file", "--reason", "--build", "--base", "--test-cmd", "--max", "--test-timeout-min", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
+VALUE_OPTS = {"--from", "--status", "--exit", "--minutes", "--notes", "--notes-file", "--reason", "--build", "--base", "--test-cmd", "--max", "--test-timeout-min", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
               "--model", "--timeout-min", "--poll", "--exclude", "--commit", "--url", "--backend-engine", "--effort", "--budget-min"}
 
 
@@ -534,11 +540,19 @@ DEFAULT_MANUAL = "agy_manual"
 def cmd_handoff(a) -> int:
     project = pathlib.Path(a.project).resolve()
     engines = _engines(a)
+    if a.pending:
+        if a.wp_id or a.tag or a.extra or a.extra_file or a.engine:
+            print("[jbr handoff] --pending takes no package, --tag, --engine or --extra: it collects them itself", file=sys.stderr)
+            return 2
+        return _handoff_pending(a, project, engines)
+    if not a.wp_id:
+        print("[jbr handoff] give a package id, or --pending for every outstanding one", file=sys.stderr)
+        return 2
     engine_key = a.engine or router.load_routing(project).get(a.wp_id) or DEFAULT_MANUAL
     try:
         res = runner.handoff(project, a.wp_id, engine_key, engines, project / a.packages, a.prompts,
                              extra=_extra(a), tag=a.tag, reports_dir=a.reports)
-    except (KeyError, ValueError) as e:
+    except (KeyError, ValueError, OSError) as e:
         print(f"[jbr handoff] {e.args[0] if e.args else e}", file=sys.stderr)
         return 2
     if a.print_prompt:
@@ -553,26 +567,124 @@ def cmd_handoff(a) -> int:
     return 0
 
 
+def _handoff_pending(a, project: pathlib.Path, engines: dict) -> int:
+    try:
+        res = runner.handoff_pending(project, engines, project / a.packages, a.prompts, router.load_routing(project),
+                                     reports_dir=a.reports, inline=a.print_prompt, done=set(a.done))
+    except (KeyError, ValueError, OSError) as e:
+        print(f"[jbr handoff] {e.args[0] if e.args else e}", file=sys.stderr)
+        return 2
+    for it in res["blocked"]:
+        print(f"[jbr handoff] {runner._label(it['wp'], it['tag'])} not yet: waits on {', '.join(it['blocked_on'])} "
+              f"(already built elsewhere? add --done {' '.join(it['blocked_on'])})", file=sys.stderr)
+    if not res["items"]:
+        print("[jbr handoff] nothing ready: no package is assigned to a manual engine without a recorded outcome"
+              + (" and with its dependencies built" if res["blocked"] else ""))
+        return 0
+    if a.print_prompt:
+        print(res["text"])
+        return 0
+    print(f"[jbr handoff] {len(res['items'])} pending (you run them; jbr executes nothing):")
+    for n, it in enumerate(res["items"], 1):
+        print(f"  {n}. {runner._label(it['wp'], it['tag'])} on {it['engine']}" + ("" if it["existing"] else "  (new packet)"))
+    print(f"checklist: {res['path']}")
+    print("Paste into ONE agy session you start (or use --print to paste everything inline):\n")
+    print(res["pointer"])
+    print(f"\nWhen it finishes, save its output to a file and run:\n"
+          f"  python -m jbr --project \"{project}\" done --from <that file>")
+    return 0
+
+
+def _done_one(a, project: pathlib.Path, wp: str, tag: str, status: str, notes: str) -> dict | None:
+    """mark_done + one output line; the result, or None (error printed)."""
+    try:
+        res = runner.mark_done(project, wp, tag, a.reports, status=status, exit_code=a.exit_code,
+                               minutes=a.minutes, notes=notes, force=a.force)
+    except ValueError as e:
+        print(f"[jbr done] {e}", file=sys.stderr)
+        return None
+    print(f"{runner._label(wp, tag)}: {res['engine']} {res['status']} exit={res['exit']} {res['minutes']}min marker={res['marker']}")
+    return res
+
+
 def cmd_done(a) -> int:
     project = pathlib.Path(a.project).resolve()
+    if a.from_file:
+        if a.notes or a.notes_file or a.tag:
+            print("[jbr done] --from reads status and notes from the report blocks; drop --notes/--notes-file/--tag", file=sys.stderr)
+            return 2
+        try:
+            reports = runner.parse_reports(pathlib.Path(a.from_file).read_text(encoding="utf-8", errors="replace"))
+        except OSError as e:
+            print(f"[jbr done] {e}", file=sys.stderr)
+            return 2
+        pk = project / a.packages
+        ids = [w["id"] for w in runner.load_packages(pk)[0]] if pk.exists() else []
+        wanted = set(a.wp_ids)
+        todo = [(label, r) for label, r in reports.items()
+                if not wanted or label in wanted or runner.split_stem(label, ids)[0] in wanted]
+        if not todo:
+            print(f"[jbr done] no === REPORT <id> === block" + (f" for {sorted(wanted)}" if wanted else "") + f" in {a.from_file}",
+                  file=sys.stderr)
+            return 2
+        rc, recorded = 0, []
+        for label, r in todo:
+            key = runner.resolve_report(project, label, ids, a.reports)
+            if key is None:
+                print(f"[jbr done] REPORT {label}: its round 0 is already recorded and it does not name one open fix round; "
+                      f"not recorded (re-run with the exact id, e.g. `done --from {a.from_file} {label}-fix1`, after "
+                      f"fixing the block's id)", file=sys.stderr)
+                rc = 2
+                continue
+            if runner.read_done(project, *key, a.reports) is not None and not a.force:
+                print(f"[jbr done] {runner._label(*key)} already recorded; not overwritten", file=sys.stderr)
+                rc = 2
+                continue
+            res = _done_one(a, project, key[0], key[1], a.status if a.status != "OK" else r["status"], r["notes"])
+            if res:
+                recorded.append(res)
+            else:
+                rc = 2
+        seen = {runner.split_stem(label, ids)[0] for label in reports} | set(reports)
+        for wp in sorted(wanted - seen):
+            print(f"{wp}: no report block in {a.from_file}; not recorded", file=sys.stderr)
+            rc = 2
+        _next_hint(recorded)
+        return rc
+    if not a.wp_ids:
+        print("[jbr done] give the package id(s), or --from <engine output file>", file=sys.stderr)
+        return 2
+    if len(a.wp_ids) > 1 and (a.notes or a.notes_file):
+        print("[jbr done] --notes/--notes-file belong to one package; record several with --from", file=sys.stderr)
+        return 2
     notes = a.notes or ""
     try:
         if a.notes_file:
             notes = (notes + "\n\n" if notes else "") + pathlib.Path(a.notes_file).read_text(encoding="utf-8")
-        res = runner.mark_done(project, a.wp_id, a.tag, a.reports, status=a.status, exit_code=a.exit_code,
-                               minutes=a.minutes, notes=notes, force=a.force)
-    except (OSError, ValueError) as e:
+    except OSError as e:
         print(f"[jbr done] {e}", file=sys.stderr)
         return 2
-    print(f"{a.wp_id}{('-' + a.tag) if a.tag else ''}: {res['engine']} {res['status']} exit={res['exit']} "
-          f"{res['minutes']}min marker={res['marker']}")
-    if res["status"] == "OK":
-        print("next: review it with workflows/review_level.js"
-              + (f" (args.logTag: '{a.tag}')" if a.tag else "") + ", then `jbr compose-fix` for a fix packet")
-    else:
-        print(f"next: no engine work to review; hand it off again (same round) or pass engineStatus "
-              f"{{{a.wp_id}: '{res['status'].lower()}'}} to review_level.js")
-    return 0
+    rc, recorded = 0, []
+    for wp in a.wp_ids:
+        res = _done_one(a, project, wp, a.tag, a.status, notes)
+        if res:
+            recorded.append(res)
+        else:
+            rc = 2
+    _next_hint(recorded)
+    return rc
+
+
+def _next_hint(recorded: list[dict]) -> None:
+    """What to run next for the outcomes actually written (OK -> review with its logTag)."""
+    ok = [r for r in recorded if r["status"] == "OK"]
+    for r in ok:
+        print(f"next: review {r['wp']} with workflows/review_level.js"
+              + (f" (args.logTag: '{r['tag']}')" if r["tag"] else "") + ", then `jbr compose-fix` for a fix packet")
+    dead = [runner._label(r["wp"], r["tag"]) for r in recorded if r["status"] != "OK"]
+    if dead:
+        print(f"next: {', '.join(dead)}: no engine work to review; hand off again (same round) or pass engineStatus "
+              "'crash' for them to review_level.js")
 
 
 def cmd_paths(a) -> int:
