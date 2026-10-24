@@ -100,10 +100,16 @@ def is_manual(eng: dict) -> bool:
     return eng.get("runner") == MANUAL
 
 
+def is_explicit_only(eng: dict) -> bool:
+    """Engines only an explicit `assign` (or a build_dag pin) hands work to: manual ones (the user runs them) and
+    `assign_only` ones (e.g. muse_spark: its contributor tier sends code to Meta for training, so never by default)."""
+    return is_manual(eng) or bool(eng.get("assign_only"))
+
+
 def usable_engines(engines: dict[str, dict], availability: dict[str, dict] | None = None) -> dict[str, dict]:
     """Available engines (engines.json / --available) minus those whose live probe is not usable.
     Manual engines are never usable for automatic routing: only `assign` hands work to them."""
-    avail = {k: v for k, v in available_engines(engines).items() if not is_manual(v)}
+    avail = {k: v for k, v in available_engines(engines).items() if not is_explicit_only(v)}
     if availability is None:
         return avail
     return {k: v for k, v in avail.items() if availability.get(k, {}).get("status", "UNKNOWN") in USABLE_STATUSES}
@@ -191,7 +197,7 @@ def build_request(packages: list[dict], engines: dict[str, dict], extra_state: d
     avail = usable_engines(engines, availability)
     if not avail:
         raise ValueError("no engine is available; use --available <engine>=yes")
-    auto = {k: e for k, e in engines.items() if not is_manual(e)}  # Jev never sees the engines the user runs by hand
+    auto = {k: e for k, e in engines.items() if not is_explicit_only(e)}  # Jev never sees explicit-only engines
     state: dict[str, Any] = {
         "goal": DEFAULT_GOAL,
         "engines": {k: engine_description(k, e, None if availability is None else availability.get(k, {}))
@@ -274,7 +280,9 @@ def assign(project_root: str | os.PathLike, assignments: dict[str, str], engines
             raise ValueError(f"{wp}: unknown engine {eng!r}; known: {sorted(engines)}")
         if not engines[eng].get("available", True) and is_manual(engines[eng]):
             raise ValueError(f"{wp}: engine {eng} is disabled (available=false / --available no); assign another")
-        if eng not in usable and eng != LAST_RESORT and not is_manual(engines[eng]):
+        explicit_ok = engines[eng].get("assign_only") and engines[eng].get("available", True) and \
+            (availability or {}).get(eng, {}).get("status", "UNKNOWN") in USABLE_STATUSES
+        if eng not in usable and eng != LAST_RESORT and not is_manual(engines[eng]) and not explicit_ok:
             live = (availability or {}).get(eng, {})
             raise ValueError(f"{wp}: engine {eng} is not usable now ({live.get('status', 'disabled')}"
                              f"{' until ' + live['until'] if live.get('until') else ''}); assign another")

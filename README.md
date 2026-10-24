@@ -65,6 +65,7 @@ on the jbr CLI, and list them in `args.engineChain`.
 | 4 | `ollama_qwen` | local Qwen 3.8 27B on Ollama via codex `--oss` (Mac only; free, slow; runners wait ~140 min) |
 | 4 | `lan_qwen` | Qwen on a LAN OpenAI-compatible server, codex with `CODEX_HOME=~/.codex-local` (free; needs `LOCAL_LLM_KEY`; runners wait ~140 min) |
 | 5 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
+| (4) | `muse_spark` | **assign only**: Meta Muse Code, `muse exec` on `muse-spark-1.3-contributor` (Meta may train on what it is sent; needs billing set up at dev.meta.ai). Never in a chain, `pick` or Jev |
 
 **agy model names** (`jbr/models.py`): an agy engine's `"model"` may be `auto:<family>` instead of a pinned id, so a
 retired id (agy dropped gemini-3.1-pro-high on 2026-10-16) no longer breaks the chain. `jbr probe` and `jbr run`
@@ -278,7 +279,7 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | field | meaning |
 |---|---|
 | `description` | Free text **for Jev**: observed speed, defect rate, quota behaviour, model family vs reviewers. Keep it honest and dated; it is the evidence Jev weighs. |
-| `runner` | `agy` \| `codex` \| `claude_subagent` \| `manual`. Only the first two are executed by `jbr run`; `claude_subagent` packages are implemented by workflow subagents inside `build_dag.js`; `manual` engines are run by the user (`jbr handoff` / `jbr done`, see Manual agy). |
+| `runner` | `agy` \| `codex` \| `muse` \| `claude_subagent` \| `manual`. Only the first three are executed by `jbr run`; `claude_subagent` packages are implemented by workflow subagents inside `build_dag.js`; `manual` engines are run by the user (`jbr handoff` / `jbr done`, see Manual agy). |
 | `model`, `effort` | Passed to the CLI (`--model`/`-m`, `--effort`/`model_reasoning_effort`). |
 | `parallel_limit` | Informational for Jev (and you); not enforced by `spawn`. |
 | `available` | Static on/off switch: `true` for every shipped engine except `agy_gemini_pro` / `agy_claude_opus` (off since 2026-10-24); live probes decide the rest. Override per call with `--available k=yes|no` (a `no` engine probes `UNAVAILABLE disabled`). A single usable engine short-circuits routing without an API call. |
@@ -286,8 +287,12 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | `env` | Optional `{VAR: value}` (`~` expanded) set for the engine's run and its probe, e.g. `lan_qwen`'s `CODEX_HOME`. |
 | `windows_sandbox` | Optional codex sandbox used instead of `workspace-write` on Windows only (`danger-full-access` where the sandboxed shell fails with `CryptUnprotectData failed`). |
 | `effort` | An empty string drops `model_reasoning_effort` (servers that take no effort). |
+| `assign_only` | `true`: never in an automatic chain, `pick`, or Jev's choices, and no live probe from `availability`/`route`. Only `assign WP=<engine>` (or a build_dag pin) uses it, and that run's own probe checks it. For engines with a cost you choose per package, such as `muse_spark` sending code to Meta. |
+| `contributor_mode` / `max_model_steps` | muse only: `--contributor-mode on\|off` and `--max-model-steps N`. |
 
-Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `agy_manual`, `codex_astra`, `ollama_qwen`, `lan_qwen`.
+Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `agy_manual`, `codex_astra`, `ollama_qwen`, `lan_qwen`, `muse_spark`.
+
+**muse_spark (2026-10-24).** Runs `muse exec --model <m> --workspace <root> --prompt-file <prompt> --disable-approval --disable-request-user-input --no-foreign-personal-context --reasoning-effort <e> --contributor-mode on`. The CLI reads the prompt file itself. Approvals are off because nobody can answer them headless; the OS sandbox stays on (never `--yolo`), and personal rules and skills from other agents are not loaded. The probe sends `Reply only READY.` with shell, writes, web and session log all off. `API error 402 ... Billing verification failed` gives UNAVAILABLE on probe and CRASH on a run (not QUOTA). On 2026-10-24 that is what this account returned, even on the contributor model, so it needs billing set up at dev.meta.ai. For private code, override with model `muse-spark-1.3` and `contributor_mode: off` (paid, not used for training).
 
 **LAN Qwen setup (`lan_qwen`).** codex with the user's normal `~/.codex` sends ~108k tokens (plugins, skills, MCP
 tools, AGENTS.md), more than a 32K local model holds. `lan_qwen` therefore runs codex with its own slim home,

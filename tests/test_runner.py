@@ -257,7 +257,7 @@ def test_shipped_ollama_engine_sits_before_claude_in_the_chain():
     engines = router.load_engines(REPO / "engines.json")
     assert engines["ollama_qwen"]["local_provider"] == "ollama"
     assert "ollama_qwen" in router.available_engines(engines)   # on by default; its live probe decides
-    automatic = [k for k in router.by_priority(engines) if not router.is_manual(engines[k])]  # agy_manual: never chained
+    automatic = [k for k in router.by_priority(engines) if not router.is_explicit_only(engines[k])]  # agy_manual, muse_spark: never chained
     assert automatic[-3:] == ["ollama_qwen", "lan_qwen", "claude_subagent"]
     # automated agy ships off (2026-10-24, Antigravity terms): never in a shipped chain
     assert router.chain_for("codex_astra", engines) == ["codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"]

@@ -67,5 +67,16 @@
     "parallel_limit": 1,
     "available": true,
     "priority": 4
+  },
+  "muse_spark": {
+    "description": "Meta Muse Code CLI (`muse exec`, headless use documented by Meta for scripts/CI) on Muse Spark 1.3, contributor tier: Meta may use what it is sent (the package's code) to train its models, so ONLY for code you are fine sharing, never private repos. ASSIGN ONLY: never in an automatic chain, `pick` or Jev; only `jbr assign WP=muse_spark` hands work to it. Needs billing set up at dev.meta.ai: on 2026-10-24 this account got `API error 402 Billing verification failed` even on the contributor model (no subscription). Runs with approvals off and the OS sandbox on; personal rules/skills from other agents are not loaded. Quality unproven (no independent benchmark yet): review strictly. Non-training variant: model muse-spark-1.3 with contributor_mode off (paid).",
+    "runner": "muse",
+    "model": "muse-spark-1.3-contributor",
+    "contributor_mode": "on",
+    "effort": "high",
+    "parallel_limit": 1,
+    "available": true,
+    "assign_only": true,
+    "priority": 4
   }
 }

@@ -176,13 +176,27 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
             cmd[2:2] = ["--oss", "--local-provider", engine["local_provider"]]
         # a LAN OpenAI-compatible server is configured in its own slim CODEX_HOME instead (engines.json `env`)
         return cmd
+    if runner == "muse":
+        # Meta Muse Code, headless (`muse exec` is documented for scripts/CI). The CLI reads the prompt file
+        # itself (it lives in ~/.jbr, outside the workspace its tools are rooted at). No one can answer an
+        # approval prompt headless: approvals off, sandbox stays ON (never --yolo). Personal rules/skills from
+        # other agents (~/.claude) are kept out: contributor-tier content may be used by Meta for training.
+        cmd = ["muse", "exec", "--model", model, "--workspace", str(project_root), "--prompt-file", str(prompt_file),
+               "--disable-approval", "--disable-request-user-input", "--no-foreign-personal-context"]
+        if effort:
+            cmd += ["--reasoning-effort", effort]
+        if engine.get("contributor_mode"):
+            cmd += ["--contributor-mode", engine["contributor_mode"]]
+        if engine.get("max_model_steps"):
+            cmd += ["--max-model-steps", str(engine["max_model_steps"])]
+        return cmd
     if runner == "agy":
         cmd = ["agy", "-p", pointer, "--model", model, "--dangerously-skip-permissions", "--print-timeout", timeout]
         if not model.removeprefix(models.AUTO).startswith("claude"):
             # agy rejects --effort for Claude thinking models (their thinking is the boost)
             cmd += ["--effort", effort]
         return cmd
-    raise ValueError(f"unknown runner {runner!r} (expected agy|codex|claude_subagent|manual)")
+    raise ValueError(f"unknown runner {runner!r} (expected agy|codex|muse|claude_subagent|manual)")
 
 
 # ----------------------------------------------------------------------------- classification
@@ -192,6 +206,9 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|\"error_code\"\s*:\s*429|\bcode 429\b|quota (?:reached|exceeded|exhausted)"
                       r"|usage limit|rate[- ]limit(?:ed)? exceeded", re.IGNORECASE)
 RESET_RE = re.compile(r"resets? in ([0-9][0-9hms ]*[hms])|try again (?:at|in) ([^.\n\"]+)", re.IGNORECASE)
+# Account cannot be billed (Muse: `API error 402 ... Billing verification failed`, 2026-10-24): no work, not a quota
+# window, so not marked exhausted; the next probe says UNAVAILABLE and backs off.
+BILLING_RE = re.compile(r"API error 402|Billing verification failed|\bbilling_error\b", re.IGNORECASE)
 FAST_EXIT_MIN = 1.0   # an engine that finishes this fast...
 NO_WORK_CHARS = 1000  # ...with less transcript than this did no work (quota stall / instant refusal)
 
@@ -205,7 +222,7 @@ def classify_run(exit_code: int, minutes: float, log_text: str) -> tuple[str, st
     OK: the engine ran and produced output (even with a non-zero exit: the review judges it).
     """
     body = "\n".join(ln for ln in log_text.splitlines() if not ln.startswith("# ")).strip()
-    if exit_code == -1:
+    if exit_code == -1 or BILLING_RE.search(log_text):
         return "CRASH", ""
     stalled = exit_code == 124 and not body  # agy --print-timeout after a silent quota stall (observed ~90 min)
     if QUOTA_RE.search(log_text) or stalled or (minutes < FAST_EXIT_MIN and len(body) < NO_WORK_CHARS):

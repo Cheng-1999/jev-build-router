@@ -323,6 +323,14 @@ def probe_command(engine: dict) -> list[str] | None:
         # codex itself sends ~140k tokens of context: minutes on a local model, past PROBE_TIMEOUT_S.
         # Ask Ollama directly instead (seconds); it fails fast when the server or model is missing.
         return [_bin("ollama"), "run", "--think=false", model, PROBE_PROMPT]
+    if r == "muse":
+        # one tiny prompt, every tool off, nothing logged, no personal context; workspace = the state dir (cwd)
+        cmd = [_bin("muse"), "exec", "--model", model, "--reasoning-effort", "low", "--disable-shell", "--disable-write",
+               "--disable-web-tools", "--disable-request-user-input", "--no-foreign-personal-context", "--no-session-log",
+               "--max-model-steps", "2"]
+        if engine.get("contributor_mode"):
+            cmd += ["--contributor-mode", engine["contributor_mode"]]
+        return cmd + [PROBE_PROMPT]
     if r == "codex":
         # NB: this codex build has no --full-auto (it exits immediately); -s workspace-write is the sandbox flag
         return [_bin("codex"), "exec", "--skip-git-repo-check", "-m", model, "-s", "workspace-write", CODEX_PROBE_PROMPT]
@@ -412,7 +420,7 @@ def pick(engines: dict[str, dict], exclude: set[str] | None = None, **kw: Any) -
     exclude = exclude or set()
     seen: list[Probe] = []
     for k in by_priority(engines):
-        if k in exclude:
+        if k in exclude or engines[k].get("assign_only"):  # only an explicit `assign` hands work to those
             continue
         r = probe(k, engines, **kw)
         seen.append(r)
@@ -425,6 +433,8 @@ def availability(engines: dict[str, dict], live: bool = True, **kw: Any) -> dict
     """{engine: {"status", "detail", "until", "priority"}} for every engine (probing live when asked)."""
     out = {}
     for k in by_priority(engines):
-        r = probe(k, engines, live=live, **kw)
+        # assign_only engines are never chosen automatically: no live call for them here (the state file still
+        # counts); the run's own probe (build_dag runner / `jbr probe`) checks them when they are actually used
+        r = probe(k, engines, live=live and not engines[k].get("assign_only"), **kw)
         out[k] = {"status": r.status, "detail": r.detail, "until": iso(r.until), "priority": engines[k].get("priority")}
     return out

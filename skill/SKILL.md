@@ -97,6 +97,10 @@ Decide from, in this order:
      prefer Gemini or Codex for subtle state/billing/security code;
    - legal, privacy or user-facing wording: Claude subagent (and say why);
    - small, fully specified, low-risk packages (a doc edit, a config line, one function with its tests): assign `ollama_qwen` outright; it is free;
+   - `muse_spark` (Meta Muse Code, assign only): never by default. Assign it only when the user agreed for
+     this project, since the contributor tier lets Meta train on the package's code; never for private repos.
+     It needs billing at dev.meta.ai (a probe that says `Billing verification failed` means not set up).
+     Quality is unproven, so record its builds (`jbr record`) to build a scorecard before relying on it;
    - `agy_manual` (Gemini via agy, run by the user in batches): a well-specified, self-contained package of
      medium size, where a non-Claude family helps review (it is what `agy_gemini_pro` used to get: ~6 min,
      usually one fix round for spec-literal misses). Do NOT give it a package on the critical path that other
