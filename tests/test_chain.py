@@ -343,6 +343,8 @@ def test_route_passes_priority_and_live_status_and_writes_chains(project, packag
     assert st["engine_chain"] == [{"engine": "agy_gemini_pro", "priority": 1, "live_status": "EXHAUSTED"},
                                   {"engine": "agy_claude_opus", "priority": 2, "live_status": "AVAILABLE"},
                                   {"engine": "codex_astra", "priority": 3, "live_status": "AVAILABLE"},
+                                  # agy Flash ships off (automated agy, 2026-10-24): listed for context, never offered
+                                  {"engine": "agy_gemini_flash", "priority": 3, "live_status": "UNAVAILABLE"},
                                   # local Qwen switched off by the fixture: listed for context, never offered
                                   {"engine": "ollama_qwen", "priority": 4, "live_status": "UNAVAILABLE"},
                                   {"engine": "lan_qwen", "priority": 4, "live_status": "UNAVAILABLE"},

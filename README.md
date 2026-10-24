@@ -61,6 +61,7 @@ on the jbr CLI, and list them in `args.engineChain`.
 |---|---|---|
 | 1 | `agy_gemini_pro` | **off by default.** agy, `auto:gemini` (newest Gemini `agy models` lists; 2026-10-16: gemini-4-argon-high) |
 | 2 | `agy_claude_opus` | **off by default.** agy, `auto:claude-opus` (newest Claude Opus; 2026-10-16: claude-opus-5-5-high) |
+| 3 | `agy_gemini_flash` | **off by default.** agy, `gemini-3.8-flash-high` (pinned); separate quota bucket from Argon (2026-10-19: Argon exhausted 145 h while Flash answered); unproven, review strictly |
 | 3 | `codex_astra` | codex, gpt-6-astra (`-s workspace-write`) |
 | 4 | `ollama_qwen` | local Qwen 3.8 27B on Ollama via codex `--oss` (Mac only; free, slow; runners wait ~140 min) |
 | 4 | `lan_qwen` | Qwen on a LAN OpenAI-compatible server, codex with `CODEX_HOME=~/.codex-local` (free; needs `LOCAL_LLM_KEY`; runners wait ~140 min) |
@@ -302,7 +303,7 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | `assign_only` | `true`: never in an automatic chain, `pick`, or Jev's choices, and no live probe from `availability`/`route`. Only `assign WP=<engine>` (or a build_dag pin) uses it, and that run's own probe checks it. For engines with a cost you choose per package, such as `muse_spark` sending code to Meta. |
 | `contributor_mode` / `max_model_steps` | muse only: `--contributor-mode on\|off` and `--max-model-steps N`. |
 
-Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `agy_manual`, `codex_astra`, `ollama_qwen`, `lan_qwen`, `muse_spark`.
+Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `agy_gemini_flash`, `agy_manual`, `codex_astra`, `ollama_qwen`, `lan_qwen`, `muse_spark`.
 
 **muse_spark (2026-10-24).** Runs `muse exec --model <m> --workspace <root> --prompt-file <prompt> --disable-approval --disable-request-user-input --no-foreign-personal-context --reasoning-effort <e> --contributor-mode on`. The CLI reads the prompt file itself. Approvals are off because nobody can answer them headless; the OS sandbox stays on (never `--yolo`), and personal rules and skills from other agents are not loaded. The probe sends `Reply only READY.` with shell, writes, web and session log all off. `API error 402 ... Billing verification failed` gives UNAVAILABLE on probe and CRASH on a run (not QUOTA). On 2026-10-24 that is what this account returned, even on the contributor model, so it needs billing set up at dev.meta.ai. For private code, override with model `muse-spark-1.3` and `contributor_mode: off` (paid, not used for training).
 
