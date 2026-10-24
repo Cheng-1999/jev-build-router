@@ -138,10 +138,22 @@ New packages get their packet. Packets already handed off are reused as they are
 fix instructions, and a package with an open fix round gets no new round-0 packet. Rerun `--pending` at any
 time: it lists only what is still open, and deletes the checklist once nothing is. Each entry gives the exact REPORT ID to use (`WP03-fix1` for a fix round). A bare `REPORT WP03`
 is recorded against WP03's one open fix round when round 0 is already recorded. Otherwise it is refused, and a
-recorded outcome is never overwritten without `--force`. A package whose dependency is not built yet gets no
-packet and is listed under NOT YET. A dependency counts as built when it is earlier on the checklist, has an OK
-run, or is passed with `--done WP..`: use that for packages a Claude subagent built, since those leave no run
-marker. Blocking carries down the dependency chain, and fix rounds are never blocked. `done --from` records
+recorded outcome is never overwritten without `--force`. A package whose dependency is not ready gets no
+packet and is listed under NOT YET with the reason (`WP30 built but not accepted (open fix round)`). A
+dependency is ready when it is earlier on the same checklist (that session builds it first), or when it is
+**accepted** and has no open fix round. An OK run alone is not enough (since 2026-10-24: a fix round on built
+code would otherwise race the agy session that builds on it). Accepted means one of:
+
+- passed with `--done WP..` (space- and/or comma-separated: `--done WP01 WP02`, `--done WP01,WP02`; unknown ids
+  are reported). Use it for packages a Claude subagent built or a review you did by hand.
+- a ledger row with `final: accept` for that project folder (`jbr record`), written after its last fix round.
+- its highest-round `review-<WP>-round<N>.json` (`compose-fix`) says `accept`, written after its last fix round.
+
+An open fix round blocks dependents even when the package is in `--done`. A fix round counts as open when there
+is a `fix-<WP>-round<N>.md` with no OK run marker or accept written after it, a fix-round run (`--tag fixN...`
+or queue `qN`, N >= 1) that has not ended OK, or a `jbr queue fix` still pending or running. To clear one, let
+the fix run finish and record the re-review's accept. If the fix was abandoned, remove its fix file from the runs
+dir. Blocking carries down the dependency chain, and fix rounds are never blocked. `done --from` records
 every block it finds (pass ids to limit it). Ids with no block stay open, and a recorded CRASH has to be handed
 off again explicitly. In a batch, each package's minutes are measured from its own `handoff`, so later
 packages show the time spent on earlier ones as well.
