@@ -45,7 +45,7 @@ def _parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("route", help="ask Jev which engine implements each package; writes ~/.jbr/runs/<key>/routing.json")
     r.add_argument("--dry-run", action="store_true", help="print the request instead of calling TypeSafe")
-    r.add_argument("--done", nargs="*", default=[], help="package ids already finished (excluded)")
+    r.add_argument("--done", nargs="*", default=[], help="package ids already finished (excluded); space- and/or comma-separated")
     r.add_argument("--now", default=None, help="local time hint passed to Jev")
     r.add_argument("--goal", default=None, help="override the goal sentence")
     r.add_argument("--state-json", default=None, help="path to extra state merged into the request")
@@ -152,7 +152,8 @@ def _parser() -> argparse.ArgumentParser:
     ho.add_argument("--pending", action="store_true",
                     help="every package assigned to a manual engine and not finished, plus open fix handoffs: one checklist")
     ho.add_argument("--done", nargs="*", default=[], metavar="WP",
-                    help="with --pending: dependencies already built elsewhere (e.g. by a Claude subagent: no run marker)")
+                    help="with --pending: dependencies already built AND accepted elsewhere (e.g. by a Claude subagent: no run "
+                         "marker); space- and/or comma-separated. Never overrides an open fix round")
     ho.add_argument("--engine", default=None, help="manual engine key (default: from routing.json, else agy_manual)")
     ho.add_argument("--extra", default="", help="additional manager instructions")
     ho.add_argument("--extra-file", default=None, help="file with additional instructions (e.g. fix-WP-round1.md)")
@@ -183,6 +184,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def _engines(a) -> dict:
     return router.load_engines(a.engines, router.parse_available(a.available))
+
+
+def _ids(values: list[str]) -> set[str]:
+    """--done WP01 WP02, --done WP01,WP02 and --done "WP01, WP02" all mean the same two ids."""
+    return {t for v in values for t in v.replace(",", " ").split()}
 
 
 def _engine_for(a, wp_id: str, project: pathlib.Path) -> str:
@@ -220,7 +226,7 @@ def cmd_route(a) -> int:
         if v["status"] not in router.USABLE_STATUSES:
             print(f"[jbr route] {k}: {v['status']}" + (f" until {v['until']}" if v.get("until") else "")
                   + (f" ({v['detail']})" if v.get("detail") else ""), file=sys.stderr)
-    doc = router.route(project, packages, engines, extra_state, done=set(a.done), dry_run=a.dry_run,
+    doc = router.route(project, packages, engines, extra_state, done=_ids(a.done), dry_run=a.dry_run,
                        model=a.model, write=not a.no_write, availability=avail)
     if doc.get("dry_run"):
         req = doc["request"]
@@ -570,18 +576,26 @@ def cmd_handoff(a) -> int:
 
 
 def _handoff_pending(a, project: pathlib.Path, engines: dict) -> int:
+    done = _ids(a.done)
     try:
+        known = {w["id"] for w in runner.load_packages(project / a.packages)[0]}
+        if done - known:
+            print(f"[jbr handoff] --done: not in {a.packages}, ignored: {' '.join(sorted(done - known))}", file=sys.stderr)
         res = runner.handoff_pending(project, engines, project / a.packages, a.prompts, router.load_routing(project),
-                                     reports_dir=a.reports, inline=a.print_prompt, done=set(a.done))
+                                     reports_dir=a.reports, inline=a.print_prompt, done=done)
     except (KeyError, ValueError, OSError) as e:
         print(f"[jbr handoff] {e.args[0] if e.args else e}", file=sys.stderr)
         return 2
     for it in res["blocked"]:
-        print(f"[jbr handoff] {runner._label(it['wp'], it['tag'])} not yet: waits on {', '.join(it['blocked_on'])} "
-              f"(already built elsewhere? add --done {' '.join(it['blocked_on'])})", file=sys.stderr)
+        fixing = [d for d in it["blocked_on"] if it["blocked_why"].get(d) == runner.OPEN_FIX]
+        rest = [d for d in it["blocked_on"] if d not in fixing]
+        hint = [f"accepted already? add --done {' '.join(rest)}"] if rest else []
+        hint += [f"finish {', '.join(fixing)}'s fix round and record its review first (--done does not override it)"] if fixing else []
+        print(f"[jbr handoff] {runner._label(it['wp'], it['tag'])} not yet: waits on {runner.blocked_text(it)} "
+              f"({'; '.join(hint)})", file=sys.stderr)
     if not res["items"]:
         print("[jbr handoff] nothing ready: no package is assigned to a manual engine without a recorded outcome"
-              + (" and with its dependencies built" if res["blocked"] else ""))
+              + (" and with its dependencies built and accepted" if res["blocked"] else ""))
         return 0
     if a.print_prompt:
         print(res["text"])

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 import traceback
+from datetime import datetime, timezone
 from typing import Any
 
 from jbr import models, paths
@@ -480,24 +481,109 @@ def _topo(packages: list[dict]) -> dict[str, int]:
     return order
 
 
-def has_ok_run(project_root: str | os.PathLike, wp_id: str, known_ids: list[str], reports_dir: str | None = None) -> bool:
-    """True when any run of the package (any tag) ended OK: its code exists on disk."""
+NOT_BUILT = "not built"
+OPEN_FIX = "built but not accepted (open fix round)"
+UNREVIEWED = "built but not accepted (no accepting review recorded)"
+FIX_TAG_RE = re.compile(r"^(?:fix|q)[1-9]\d*(?:-|$)")  # fix-round runs: fixN[-fb-<engine>] (build_dag, handoff), qN (queue)
+_FIX_FILE_RE = re.compile(r"^fix-(.+)-round\d+\.md$")
+_REVIEW_FILE_RE = re.compile(r"^review-(.+)-round(\d+)\.json$")
+_RUN_SUFFIXES = (".prompt.md", ".last.md", ".handoff", ".stdout", ".done", ".log")
+
+
+def _mtime(p: pathlib.Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _ledger_ts(e: dict) -> float:
+    try:
+        return datetime.strptime(e.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def dependency_state(project_root: str | os.PathLike, wp_id: str, known_ids: list[str], reports_dir: str | None = None,
+                     *, done: set[str] | frozenset[str] = frozenset(), ledger_entries: list[dict] | None = None) -> str | None:
+    """None when the package is accepted, else why not: OPEN_FIX, UNREVIEWED or NOT_BUILT.
+
+    Accepted = passed in `done`, or an accept recorded after its last fix round: a ledger row with final
+    'accept' (`jbr record`; same project folder name) or its highest-round review-<WP>-round<N>.json with
+    verdict 'accept' (compose-fix). An OPEN fix round beats everything, `done` included: a fix-<WP>-round<N>.md,
+    a queued fix (queue.json round >= 1), or a fix-round run (tag fixN / qN, N >= 1) that did not end OK, with
+    no OK run marker and no accept written after it. Its code is about to change under whoever builds on it."""
+    from jbr import ledger, queue  # here: both import this module
     rep = paths.reports_dir(project_root, reports_dir)
-    for f in rep.glob(f"{RUN_PREFIX}-{wp_id}*.done") if rep.exists() else []:
-        wp, tag = split_stem(f.name[len(RUN_PREFIX) + 1:-len(".done")], known_ids)
-        d = read_done(project_root, wp, tag, reports_dir) if wp == wp_id else None
-        if d and engine_status(d) == "ok":
-            return True
-    return False
+    have = rep.exists()
+    closes: list[float] = []      # OK run markers (any tag) and accepts: each closes the fix rounds before it
+    accepts: list[float] = []
+    fixes: list[float] = []       # every fix-round trace (file or run), for "accepted after the last fix round"
+    open_fixes: list[float] = []  # fix-round traces not closed by their own OK marker
+    built = False
+    runs: dict[str, list[pathlib.Path]] = {}
+    for f in rep.glob(f"{RUN_PREFIX}-{wp_id}*") if have else []:
+        name = f.name[len(RUN_PREFIX) + 1:]
+        suffix = next((s for s in _RUN_SUFFIXES if name.endswith(s)), None)
+        wp, tag = split_stem(name[:-len(suffix)], known_ids) if suffix else ("", "")
+        if wp == wp_id:  # WP1 must not pick up WP10's files
+            runs.setdefault(tag, []).append(f)
+    for tag, files in runs.items():
+        ok = engine_status(read_done(project_root, wp_id, tag, reports_dir)) == "ok"
+        built = built or ok
+        if ok:
+            closes.append(_mtime(report_paths(project_root, wp_id, tag, reports_dir)["done"]))
+        if FIX_TAG_RE.match(tag):
+            t = max(_mtime(f) for f in files)
+            fixes.append(t)
+            if not ok:  # spawned / handed off / queued and still running, or it crashed: the fix is not in
+                open_fixes.append(t)
+    for f in rep.glob(f"fix-{wp_id}-round*.md") if have else []:
+        m = _FIX_FILE_RE.match(f.name)
+        if m and m.group(1) == wp_id:
+            fixes.append(_mtime(f))
+            open_fixes.append(_mtime(f))
+    reviews = []
+    for f in rep.glob(f"review-{wp_id}-round*.json") if have else []:
+        m = _REVIEW_FILE_RE.match(f.name)
+        if m and m.group(1) == wp_id:
+            reviews.append((int(m.group(2)), f))
+    if reviews:
+        f = max(reviews)[1]
+        try:
+            verdict = json.loads(f.read_text(encoding="utf-8")).get("verdict")
+        except (OSError, ValueError, AttributeError):
+            verdict = None
+        if verdict == "accept":
+            accepts.append(_mtime(f))
+    name = pathlib.Path(project_root).resolve().name
+    entries = ledger.load() if ledger_entries is None else ledger_entries
+    accepts += [_ledger_ts(e) for e in entries
+                if e.get("wp") == wp_id and e.get("project") == name and e.get("final") == "accept"]
+    closes += accepts
+    last_close = max(closes, default=None)
+    if any(last_close is None or t >= last_close for t in open_fixes):
+        return OPEN_FIX
+    if any(i.get("wp") == wp_id and i.get("status") in (queue.PENDING, queue.RUNNING) and int(i.get("round") or 0) >= 1
+           for i in queue.load(project_root)):
+        return OPEN_FIX
+    if wp_id in done:
+        return None
+    last_fix = max(fixes, default=None)
+    if any(last_fix is None or t > last_fix for t in accepts):
+        return None
+    return UNREVIEWED if built else NOT_BUILT
 
 
 def pending_manual(project_root: str | os.PathLike, packages: list[dict], routing: dict[str, str],
                    engines: dict[str, dict], reports_dir: str | None = None, done: set[str] | None = None) -> list[dict]:
     """Manual work the user still has to run, in dependency order: every .handoff without a .done (any tag,
     e.g. fix rounds), plus every package routed to a manual engine that was never handed off nor finished.
-    [{"wp", "tag", "engine", "existing": bool, "blocked_on": [dep, ...]}]. An item is blocked when a dependency
-    is neither earlier on the list (unblocked), nor has an OK run, nor is in `done` (built elsewhere, e.g. by a
-    Claude subagent, which leaves no run marker); blocking is transitive. Fix rounds (tagged) are never blocked."""
+    [{"wp", "tag", "engine", "existing": bool, "blocked_on": [dep, ...], "blocked_why": {dep: reason}}].
+    A dependency is met when it is earlier on the list (unblocked: the same session builds it first, in order)
+    or accepted (dependency_state(): in `done`, e.g. built by a Claude subagent, which leaves no run marker, or
+    an accept recorded in the ledger / a review json) and has no open fix round. An OK run alone is not enough:
+    built code can still change in review. Blocking is transitive. Fix rounds (tagged) are never blocked."""
     rep = paths.reports_dir(project_root, reports_dir)
     ids = [w["id"] for w in packages]
     out: dict[tuple[str, str], dict] = {}
@@ -517,14 +603,31 @@ def pending_manual(project_root: str | os.PathLike, packages: list[dict], routin
     deps = {w["id"]: list(w.get("depends_on") or []) for w in packages}
     done = set(done or ())
     ready: set[str] = set()
+    states: dict[str, str | None] = {}
+    entries = None
     for it in items:
+        it["blocked_why"] = {}
         # a fix round works on code that exists already: its dependencies were met in round 0
-        it["blocked_on"] = [] if it["tag"] else [
-            d for d in deps.get(it["wp"], []) if d in deps and d not in ready and d not in done
-            and not has_ok_run(project_root, d, ids, reports_dir)]
+        for d in [] if it["tag"] else deps.get(it["wp"], []):
+            if d not in deps or d in ready:
+                continue
+            if d not in states:
+                if entries is None:
+                    from jbr import ledger  # here: ledger imports this module
+                    entries = ledger.load()
+                states[d] = dependency_state(project_root, d, ids, reports_dir, done=done, ledger_entries=entries)
+            if states[d] is not None:
+                it["blocked_why"][d] = states[d]
+        it["blocked_on"] = list(it["blocked_why"])
         if not it["blocked_on"]:
             ready.add(it["wp"])
     return items
+
+
+def blocked_text(item: dict) -> str:
+    """`WP02, WP30 built but not accepted (open fix round)`: the reason is spelled out unless it is plain 'not built'."""
+    why = item.get("blocked_why") or {}
+    return ", ".join(d if why.get(d, NOT_BUILT) == NOT_BUILT else f"{d} {why[d]}" for d in item["blocked_on"])
 
 
 def _label(wp: str, tag: str) -> str:
@@ -539,7 +642,7 @@ def handoff_pending(project_root: str | os.PathLike, engines: dict[str, dict], p
     through them in order. New packages get their packet (handoff()); packets already handed off are reused
     as they are (their start time and any fix instructions kept). Writes <reports>/handoff-pending.md.
     inline=True puts each packet's text in the checklist (for engines that cannot read ~/.jbr). Blocked items
-    (an unbuilt dependency, see pending_manual) are listed as "do not start" and get no packet yet.
+    (a dependency not built or not accepted, see pending_manual) are listed as "do not start" and get no packet yet.
     Returns {"items", "blocked", "path", "pointer", "text"}; nothing ready -> no file written."""
     root = pathlib.Path(project_root).resolve()
     packages, meta = load_packages(packages_path)
@@ -584,8 +687,8 @@ def handoff_pending(project_root: str | os.PathLike, engines: dict[str, dict], p
         lines.append(f"{n}. {lab}: {titles.get(it['wp'], '')}" + (f" (depends on {', '.join(dep)})" if dep else "")
                      + f"\n   REPORT ID: {lab}" + ("" if inline else f"\n   packet: {it['prompt']}"))
     if blocked:
-        lines += ["", "NOT YET (do not start these: a package they depend on is not built)"]
-        lines += [f"- {_label(i['wp'], i['tag'])}: waits on {', '.join(i['blocked_on'])}" for i in blocked]
+        lines += ["", "NOT YET (do not start these: a package they depend on is not built or not accepted yet)"]
+        lines += [f"- {_label(i['wp'], i['tag'])}: waits on {blocked_text(i)}" for i in blocked]
     if inline:
         for it in items:
             lab = _label(it["wp"], it["tag"])

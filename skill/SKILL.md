@@ -68,8 +68,10 @@ spawn agy "to help".
 1. When you assign (step 2 below), give `agy_manual` the packages that suit it (rubric below). Do it without
    being asked: agy work is free diversity the user wants used.
 2. Right after `assign`, if anything went to `agy_manual`: run `jbr --project . [--packages/--prompts ...]
-   handoff --pending` (add `--done <ids>` for already-built dependencies a Claude subagent built). Give the user
-   the one paste line and the NOT YET list. Then carry on building the rest with `build_dag.js`. Never wait for agy.
+   handoff --pending`. Dependencies must be ACCEPTED, not just built: a ledger accept (`jbr record`), an accepting
+   `review-<WP>-round<N>.json` (`compose-fix`), or `--done <ids>` (space or comma separated) for packages accepted
+   without a record (a Claude subagent build, a review by hand). An open fix round blocks even with `--done`.
+   Give the user the one paste line and the NOT YET list. Then carry on building the rest with `build_dag.js`. Never wait for agy.
 3. The user sees every project's waiting checklist with `python -m jbr inbox`, and pastes each line into an agy
    session they start in that project.
 4. When the user says agy finished (or a saved agy output file appears where they said it would): run

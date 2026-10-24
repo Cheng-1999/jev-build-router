@@ -1,7 +1,9 @@
 """Manual engines (agy_manual): jbr writes the packet and records the outcome, never runs the engine.
 No engine is executed anywhere here: a fake subprocess.run fails the test if anything is spawned."""
 import json
+import os
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
@@ -290,12 +292,151 @@ def test_pending_blocks_packages_whose_dependency_is_not_built(project, all_engi
     assert [(i["wp"], i["blocked_on"]) for i in res["blocked"]] == [("WP03", ["WP02"])]
     assert "NOT YET" in res["text"] and "- WP03: waits on WP02" in res["text"]
     assert runner.read_handoff(project, "WP03") is None  # no packet for a blocked package
-    # WP02 built by codex (OK marker) or declared done -> WP03 is ready
+    # WP02 declared done (accepted elsewhere) -> WP03 is ready
     res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project), done={"WP02"})
     assert [i["wp"] for i in res["items"]] == ["WP01", "WP03"]
+    # built by codex (OK marker) is not accepted: WP03 still waits, with the reason spelled out
     reports(project).joinpath("run-WP02.done").write_text("0 4.0min OK\n", encoding="utf-8")
     res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project))
+    assert [(i["wp"], i["blocked_why"]) for i in res["blocked"]] == [("WP03", {"WP02": runner.UNREVIEWED})]
+    assert "- WP03: waits on WP02 built but not accepted (no accepting review recorded)" in res["text"]
+    # an accepting review (compose-fix's review json) makes it ready
+    reports(project).joinpath("review-WP02-round1.json").write_text(json.dumps({"wp": "WP02", "verdict": "accept"}),
+                                                                    encoding="utf-8")
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project))
     assert [i["wp"] for i in res["items"]] == ["WP01", "WP03"] and not res["blocked"]
+
+
+T0 = 1_800_000_000.0  # file times in the acceptance tests: only their order matters
+
+
+def _touch(project, name, t, text="x"):
+    f = reports(project) / name
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text, encoding="utf-8")
+    os.utime(f, (t, t))
+    return f
+
+
+def _ledger_accept(project, wp, t):
+    ts = datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ledger.append([{"ts": ts, "project": project.resolve().name, "wp": wp, "engine": "codex_astra", "final": "accept"}])
+
+
+def _wp03(project, all_engines, **kw):
+    """WP02 is built by an automatic engine; WP03 (depends on WP01 + WP02) is the manual package."""
+    _route(project, {"WP02": "codex_astra", "WP03": "agy_manual"})
+    return runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project),
+                                  done={"WP01"} | set(kw.pop("done", ())), **kw)
+
+
+def test_pending_blocks_a_dependency_with_an_open_fix_round(project, all_engines):
+    # 2026-10-24: WP30 built OK, reviewed by hand, fix-WP30-round1.md written, Qwen fix round queued.
+    # WP31 was listed as ready and agy would have edited the same files as the fix round.
+    _touch(project, "run-WP02.done", T0, "0 25.0min OK\n")
+    _touch(project, "fix-WP02-round1.md", T0 + 600, "FIX ROUND 1 ...")
+    res = _wp03(project, all_engines)
+    assert res["items"] == [] and [(i["wp"], i["blocked_why"]) for i in res["blocked"]] == [("WP03", {"WP02": runner.OPEN_FIX})]
+    assert runner.read_handoff(project, "WP03") is None  # no packet
+    # --done never overrides an open fix round (the incident's own --done list could have named it)
+    res = _wp03(project, all_engines, done={"WP02"})
+    assert res["items"] == [] and res["blocked"][0]["blocked_on"] == ["WP02"]
+    # an accept older than the fix file does not count either
+    _ledger_accept(project, "WP02", T0 + 300)
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.OPEN_FIX}
+    # the fix round is spawned (stdout, no marker yet): still open
+    _touch(project, "run-WP02-fix1.stdout", T0 + 700)
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.OPEN_FIX}
+    # it ends OK: the round is closed, but the fixed code is not reviewed yet
+    _touch(project, "run-WP02-fix1.done", T0 + 900, "0 12.0min OK\n")
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.UNREVIEWED}
+    assert [i["wp"] for i in _wp03(project, all_engines, done={"WP02"})["items"]] == ["WP03"]  # now --done may say so
+    # re-review accepts it (ledger row from `jbr record`, written after the fix round)
+    _ledger_accept(project, "WP02", T0 + 1200)
+    res = _wp03(project, all_engines)
+    assert [i["wp"] for i in res["items"]] == ["WP03"] and res["blocked"] == []
+
+
+def test_pending_open_fix_round_from_a_tagged_run_without_fix_file(project, all_engines):
+    _touch(project, "run-WP02.done", T0, "0 25.0min OK\n")
+    _touch(project, "review-WP02-round1.json", T0 + 100, json.dumps({"wp": "WP02", "verdict": "accept"}))
+    assert [i["wp"] for i in _wp03(project, all_engines)["items"]] == ["WP03"]  # accepted
+    # a hand-run fix round (`spawn WP02 --tag fix1 --extra-file <anywhere>`) reopens it
+    _touch(project, "run-WP02-fix1.prompt.md", T0 + 200)
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.OPEN_FIX}
+    # it crashed: the fix is not in, still open
+    _touch(project, "run-WP02-fix1.done", T0 + 300, "1 0.5min CRASH\n")
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.OPEN_FIX}
+    # the fallback engine did it (OK marker after the crash): closed, then accepted by the round-2 review
+    _touch(project, "run-WP02-fix1-fb-ollama_qwen.done", T0 + 400, "0 30.0min OK\n")
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.UNREVIEWED}
+    _touch(project, "review-WP02-round2.json", T0 + 500, json.dumps({"wp": "WP02", "verdict": "accept"}))
+    assert [i["wp"] for i in _wp03(project, all_engines)["items"]] == ["WP03"]
+    # the highest round decides: a later 'fix' verdict un-accepts it
+    _touch(project, "review-WP02-round3.json", T0 + 600, json.dumps({"wp": "WP02", "verdict": "fix"}))
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.UNREVIEWED}
+
+
+def test_pending_open_fix_round_queued_for_qwen(project, all_engines):
+    from jbr import paths, queue
+    _touch(project, "run-WP02-q0.done", T0, "0 40.0min OK\n")
+    _ledger_accept(project, "WP02", T0 + 100)
+    assert [i["wp"] for i in _wp03(project, all_engines)["items"]] == ["WP03"]
+    item = {"wp": "WP02", "engine": "ollama_qwen", "status": queue.PENDING, "round": 1, "extra_file": "/elsewhere/fix.md"}
+    queue.queue_path(project).parent.mkdir(parents=True, exist_ok=True)
+    queue.queue_path(project).write_text(json.dumps([item]), encoding="utf-8")
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.OPEN_FIX}
+    assert paths.project_dir(project) == queue.queue_path(project).parent
+
+
+def test_pending_earlier_checklist_items_still_count(project, all_engines):
+    # one agy session builds the chain in order: a dependency earlier on the same checklist is not waited for
+    _route(project, {"WP01": "agy_manual", "WP02": "agy_manual", "WP03": "agy_manual"})
+    res = runner.handoff_pending(project, all_engines, _pk(project), routing=router.load_routing(project))
+    assert [i["wp"] for i in res["items"]] == ["WP01", "WP02", "WP03"] and res["blocked"] == []
+
+
+def test_ledger_accept_of_another_project_does_not_count(project, all_engines):
+    _touch(project, "run-WP02.done", T0, "0 25.0min OK\n")
+    ledger.append([{"ts": "2030-01-01T00:00:00Z", "project": "some-other-app", "wp": "WP02", "final": "accept"},
+                   {"ts": "2030-01-01T00:00:00Z", "project": project.resolve().name, "wp": "WP02", "final": "blocked"}])
+    assert _wp03(project, all_engines)["blocked"][0]["blocked_why"] == {"WP02": runner.UNREVIEWED}
+
+
+def test_cli_done_ids_accept_commas_and_spaces():
+    assert cli._ids(["WP01,WP02", "WP03", "WP04, WP05", ",WP06,,"]) == {"WP01", "WP02", "WP03", "WP04", "WP05", "WP06"}
+    assert cli._ids([]) == set()
+
+
+def test_cli_pending_parses_comma_done_and_explains_open_fix_rounds(project, capsys):
+    base = ["--project", str(project)]
+    assert cli.main(base + ["assign", "WP03=agy_manual", "WP02=codex_astra", "--no-probe"]) == 0
+    capsys.readouterr()
+    # the 2026-10-24 call: a comma list was one unknown id, so WP01/WP02 still blocked WP03
+    assert cli.main(base + ["handoff", "--pending", "--done", "WP01,WP02,WP99"]) == 0
+    cap = capsys.readouterr()
+    assert "1 pending" in cap.out and "1. WP03 on agy_manual" in cap.out
+    assert "--done: not in ops/work_packages.json, ignored: WP99" in cap.err
+    # an open fix round on WP02: --done does not help, and the hint says so
+    (reports(project) / "run-WP03.handoff").unlink()
+    (reports(project) / "run-WP02.done").write_text("0 1.0min OK\n", encoding="utf-8")
+    _touch(project, "fix-WP02-round1.md", (reports(project) / "run-WP02.done").stat().st_mtime + 60)
+    assert cli.main(base + ["handoff", "--pending", "--done", "WP01", "WP02"]) == 0
+    cap = capsys.readouterr()
+    assert "nothing ready" in cap.out
+    assert "WP03 not yet: waits on WP02 built but not accepted (open fix round)" in cap.err
+    assert "--done does not override it" in cap.err and "add --done" not in cap.err
+
+
+def test_cli_route_parses_comma_done(project, monkeypatch, capsys):
+    seen = {}
+
+    def fake_route(project_root, packages, engines, extra_state, done=None, **kw):
+        seen["done"] = done
+        return {"dry_run": True, "request": {"model": "m", "questions": {}}}
+    monkeypatch.setattr(router, "route", fake_route)
+    assert cli.main(["--project", str(project), "route", "--dry-run", "--done", "WP01,WP02", "WP03"]) == 0
+    assert seen["done"] == {"WP01", "WP02", "WP03"}
 
 
 def test_pending_blocks_transitively_after_a_crash(project, all_engines):
