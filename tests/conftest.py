@@ -10,6 +10,12 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # What "auto:gemini" / "auto:claude-opus" resolve to in tests (the ids the chain tests were written against).
 FIXED_AGY_MODELS = ["gemini-3.1-pro-high", "gemini-3.1-pro-low", "claude-opus-5-5-high", "claude-sonnet-5-5-high"]
 
+# Automated agy engines ship available=false (2026-10-24, Antigravity terms). The chain mechanics they exercise
+# are still supported as an opt-in, so tests written against them switch them back on explicitly.
+AGY_ON = {"agy_gemini_pro": True, "agy_claude_opus": True}
+# build_dag.js default engineChain before 2026-10-24 (agy first); still valid as an explicit args.engineChain.
+AGY_CHAIN = ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"]
+
 PACKAGES = {
     "rules": "Rules: Python 3.12, src layout under src/demo, pytest.",  # prefix only; runner.DEFAULT_RULES is always appended
     "work_packages": [
@@ -68,8 +74,8 @@ def engines():
     engine is `available: true` in engines.json and live probes decide; the routing tests written
     before that keep their two-engine fixture."""
     from jbr import router
-    return router.load_engines(REPO / "engines.json", {"agy_claude_opus": False, "codex_astra": False,
-                                                         "ollama_qwen": False, "lan_qwen": False})
+    return router.load_engines(REPO / "engines.json", {"agy_gemini_pro": True, "agy_claude_opus": False, "codex_astra": False,
+                                                         "ollama_qwen": False, "lan_qwen": False, "agy_manual": False})
 
 
 @pytest.fixture

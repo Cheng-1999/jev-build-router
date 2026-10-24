@@ -7,12 +7,12 @@ Pure Python 3.12 standard library. No dependencies (pytest only for tests).
 ```
 jev-build-router/
   engines.json              default engine table (descriptions are what Jev reads)
-  jbr/                      python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview
+  jbr/                      python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done
     router.py               routing.json: commander `assign` or decision-model `route` (engine + fallback chain)
     paths.py                where jbr keeps files: ~/.jbr/runs/<project key>/ (never inside the project)
     queue.py                backlog lane: one engine (local Qwen), one package at a time, in git worktrees
     ledger.py               engine ledger + scorecard
-    runner.py               prompt composition, agy/codex commands, spawn, .done markers, compose-fix
+    runner.py               prompt composition, agy/codex commands, spawn, .done markers, compose-fix, manual handoff
     state.py                engine availability: state file, reset-hint parsing, live probe, pick
     prereview.py            cheap first-pass review: open-code-review on local Ollama, before the Claude review
     cli.py
@@ -50,14 +50,17 @@ endpoint, set `CLOUDFLARE_AI_TOKEN`, and pass the matching `--model`. An
 arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. A Jev key
 is sent only to the default Jev URL.
 
-## Engine chain (default since 2026-10-02)
+## Engine chain (default since 2026-10-02; automated agy off since 2026-10-24)
 
-agy is the base worker. Each implement/fix step prefers, in order (`priority` in `engines.json`):
+Each implement/fix step prefers, in order (`priority` in `engines.json`). **The two automated agy engines ship
+`available: false` and are not in `build_dag.js`'s default `engineChain`** (see "Manual agy" below for why and
+for `agy_manual`). To opt back in at your own risk: `--available agy_gemini_pro=yes --available agy_claude_opus=yes`
+on the jbr CLI, and list them in `args.engineChain`.
 
 | priority | engine | CLI |
 |---|---|---|
-| 1 | `agy_gemini_pro` | agy, `auto:gemini` (newest Gemini `agy models` lists; 2026-10-16: gemini-4-argon-high) |
-| 2 | `agy_claude_opus` | agy, `auto:claude-opus` (newest Claude Opus; 2026-10-16: claude-opus-5-5-high) |
+| 1 | `agy_gemini_pro` | **off by default.** agy, `auto:gemini` (newest Gemini `agy models` lists; 2026-10-16: gemini-4-argon-high) |
+| 2 | `agy_claude_opus` | **off by default.** agy, `auto:claude-opus` (newest Claude Opus; 2026-10-16: claude-opus-5-5-high) |
 | 3 | `codex_astra` | codex, gpt-6-astra (`-s workspace-write`) |
 | 4 | `ollama_qwen` | local Qwen 3.8 27B on Ollama via codex `--oss` (Mac only; free, slow; runners wait ~140 min) |
 | 4 | `lan_qwen` | Qwen on a LAN OpenAI-compatible server, codex with `CODEX_HOME=~/.codex-local` (free; needs `LOCAL_LLM_KEY`; runners wait ~140 min) |
@@ -89,6 +92,67 @@ PYTHONPATH="$JBR" python -m jbr pick --exclude agy_gemini_pro
 `pip install -e .` also works (adds a `jbr` console script) but is not required.
 
 Global options go before the subcommand: `--project <root>` (default cwd), `--packages ops/work_packages.json`, `--prompts ops/prompts`, `--reports <dir>` (default `~/.jbr/runs/<project key>/reports`; relative = inside the project), `--engines <path>` (default: this repo's `engines.json`), `--available <engine>=yes|no` (repeatable). They are also accepted after the subcommand (the spawned child relies on that).
+
+## Manual agy (`agy_manual`, since 2026-10-24)
+
+Google's Antigravity FAQ (checked 2026-10-24) says using third-party software to access Antigravity violates
+its terms and can get an account suspended. It also says `agy -p` headless mode is for "direct scripting and CI
+workflows", and that wrapping `agy` inside third-party coding agents is not supported on consumer plans. Driving
+`agy_gemini_pro` / `agy_claude_opus` from `build_dag.js` (Claude Code -> `jbr spawn` -> `agy -p`) is that pattern.
+`agy_manual` keeps agy in the build without wrapping it. **You** start agy and paste the packet. jbr only writes
+files and records what you tell it. Review stays in Claude Code.
+
+```
+PYTHONPATH="$JBR" python -m jbr assign WP05=agy_manual                 # chain is just [agy_manual]: no automatic fallback
+PYTHONPATH="$JBR" python -m jbr handoff WP05                           # writes run-WP05.prompt.md, prints the line to paste into agy
+PYTHONPATH="$JBR" python -m jbr handoff WP05 --print | pbcopy           # or paste the whole packet (agy may not read ~/.jbr)
+#   ... you run agy yourself, in a session you started, on the model you pick ...
+PYTHONPATH="$JBR" python -m jbr done WP05 --notes-file agy-report.txt  # .done "0 <min>min OK"; --status CRASH|QUOTA if it did nothing
+#   review (OK only): workflows/review_level.js with ids ['WP05'] (it reads run-WP05.log, which now holds your notes).
+#   CRASH/QUOTA: nothing to review; hand it off again (same round) or pass engineStatus {WP05: 'quota'} to review_level.js
+PYTHONPATH="$JBR" python -m jbr compose-fix review-out.json 1            # -> fix-WP05-round1.md
+PYTHONPATH="$JBR" python -m jbr handoff WP05 --tag fix1 --extra-file <reports>/fix-WP05-round1.md
+PYTHONPATH="$JBR" python -m jbr done WP05 --tag fix1                    # then review_level.js again with logTag 'fix1'
+```
+
+**Several packages in one agy session (`--pending`).** One checklist covers every package assigned to a manual
+engine with no recorded outcome, plus every open fix-round handoff, in dependency order:
+
+```
+PYTHONPATH="$JBR" python -m jbr assign WP01=agy_manual WP02=agy_manual WP03=agy_manual
+PYTHONPATH="$JBR" python -m jbr handoff --pending            # writes <reports>/handoff-pending.md, prints the line to paste
+PYTHONPATH="$JBR" python -m jbr handoff --pending --print    # or the checklist with every packet inlined
+#   ... one agy session you start works through them in order and prints a block per package:
+#       === REPORT WP01 ===  status: done|failed  tests: ...  files: ...  unsatisfied: ...  === END WP01 ===
+#   save that session's output to a file, then:
+PYTHONPATH="$JBR" python -m jbr done --from agy-session.txt   # status: done -> OK, anything else -> CRASH; block = notes
+```
+
+New packages get their packet. Packets already handed off are reused as they are, keeping their start time and
+fix instructions, and a package with an open fix round gets no new round-0 packet. Rerun `--pending` at any
+time: it lists only what is still open, and deletes the checklist once nothing is. Each entry gives the exact REPORT ID to use (`WP03-fix1` for a fix round). A bare `REPORT WP03`
+is recorded against WP03's one open fix round when round 0 is already recorded. Otherwise it is refused, and a
+recorded outcome is never overwritten without `--force`. A package whose dependency is not built yet gets no
+packet and is listed under NOT YET. A dependency counts as built when it is earlier on the checklist, has an OK
+run, or is passed with `--done WP..`: use that for packages a Claude subagent built, since those leave no run
+marker. Blocking carries down the dependency chain, and fix rounds are never blocked. `done --from` records
+every block it finds (pass ids to limit it). Ids with no block stay open, and a recorded CRASH has to be handed
+off again explicitly. In a batch, each package's minutes are measured from its own `handoff`, so later
+packages show the time spent on earlier ones as well.
+
+- runner `manual`: `run`, `spawn` and `queue add` refuse it (exit 2, before any marker is written). `probe` answers
+  `UNAVAILABLE manual: ...` without calling anything. `pick`, `route` (Jev never sees it) and every chain skip it.
+  Only an explicit `assign WP=agy_manual` or a `build_dag.js` routing pin hands work to it.
+- `build_dag.js`: when a package's routing pins a manual engine (`args.manualEngines`, default `['agy_manual']`),
+  its row ends `final: 'manual'` with the `handoff` command. Packages that depend on it end `final: 'waiting'`
+  (`waiting_on`). Nothing is spawned or polled for either. A manual engine anywhere else in a chain is dropped.
+  `jbr record` skips `manual` / `waiting` rows. Re-run the workflow with the package in `done` once it is accepted.
+- `status` shows a handed-off package as ``handed off to agy_manual: waiting for `jbr done` ``. `done` without a
+  prior `handoff` is refused, and so is a second `done` (`--force` overwrites). `--minutes` defaults to the time
+  since `handoff`. `run` / `spawn` delete a stale `.handoff`, so a package re-assigned to an automatic engine
+  cannot be marked done by hand.
+- `agy_gemini_pro` / `agy_claude_opus` ship `available: false` and are out of the default `engineChain`, so no
+  automatic build calls agy unless you opt in explicitly (see Engine chain).
 
 ## Commander routing and the engine ledger (default since 2026-10-10)
 
@@ -209,16 +273,16 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | field | meaning |
 |---|---|
 | `description` | Free text **for Jev**: observed speed, defect rate, quota behaviour, model family vs reviewers. Keep it honest and dated; it is the evidence Jev weighs. |
-| `runner` | `agy` \| `codex` \| `claude_subagent`. Only the first two are executed by `jbr run`; `claude_subagent` packages are implemented by workflow subagents inside `build_dag.js`. |
+| `runner` | `agy` \| `codex` \| `claude_subagent` \| `manual`. Only the first two are executed by `jbr run`; `claude_subagent` packages are implemented by workflow subagents inside `build_dag.js`; `manual` engines are run by the user (`jbr handoff` / `jbr done`, see Manual agy). |
 | `model`, `effort` | Passed to the CLI (`--model`/`-m`, `--effort`/`model_reasoning_effort`). |
 | `parallel_limit` | Informational for Jev (and you); not enforced by `spawn`. |
-| `available` | Static on/off switch, `true` for all four defaults since the chain (live probes decide). Override per call with `--available k=yes|no` (a `no` engine probes `UNAVAILABLE disabled`). A single usable engine short-circuits routing without an API call. |
+| `available` | Static on/off switch: `true` for every shipped engine except `agy_gemini_pro` / `agy_claude_opus` (off since 2026-10-24); live probes decide the rest. Override per call with `--available k=yes|no` (a `no` engine probes `UNAVAILABLE disabled`). A single usable engine short-circuits routing without an API call. |
 | `priority` | Chain order, 1 = most preferred. `jbr pick`, `route` (Jev's policy and the fallback chains) and the default `engineChain` follow it. Ties keep engines.json order. |
 | `env` | Optional `{VAR: value}` (`~` expanded) set for the engine's run and its probe, e.g. `lan_qwen`'s `CODEX_HOME`. |
 | `windows_sandbox` | Optional codex sandbox used instead of `workspace-write` on Windows only (`danger-full-access` where the sandboxed shell fails with `CryptUnprotectData failed`). |
 | `effort` | An empty string drops `model_reasoning_effort` (servers that take no effort). |
 
-Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `codex_astra`, `ollama_qwen`, `lan_qwen`.
+Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `agy_manual`, `codex_astra`, `ollama_qwen`, `lan_qwen`.
 
 **LAN Qwen setup (`lan_qwen`).** codex with the user's normal `~/.codex` sends ~108k tokens (plugins, skills, MCP
 tools, AGENTS.md), more than a 32K local model holds. `lan_qwen` therefore runs codex with its own slim home,
@@ -274,7 +338,7 @@ Output `routing.json` (in the runs dir; `jbr paths` prints it): `{"model": "jev-
 
 ## Run artifacts (`~/.jbr/runs/<project key>/reports/`)
 
-`run-<WP>[-tag].prompt.md` (self-contained prompt), `.log` (engine transcript), `.done` (`"<exit> <minutes>min <STATUS> [reset-hint]"`, STATUS = `OK` | `QUOTA` | `CRASH`, e.g. `3 0.0min QUOTA 2h9m31s`; `-1 <minutes>min` without a status token when `jbr run` itself crashed, traceback appended to `.log`; `wait`/`status` print the status, `runner.engine_status()` reads old and new markers), `.stdout` (detached wrapper), `.last.md` (codex final message). `spawn` exits 2 before launching anything when the engine key is not in `engines.json`. `compose-fix` writes `review-<WP>-round<N>.json` and `fix-<WP>-round<N>.md`.
+`run-<WP>[-tag].prompt.md` (self-contained prompt), `.log` (engine transcript), `.done` (`"<exit> <minutes>min <STATUS> [reset-hint]"`, STATUS = `OK` | `QUOTA` | `CRASH`, e.g. `3 0.0min QUOTA 2h9m31s`; `-1 <minutes>min` without a status token when `jbr run` itself crashed, traceback appended to `.log`; `wait`/`status` print the status, `runner.engine_status()` reads old and new markers), `.stdout` (detached wrapper), `.last.md` (codex final message), `.handoff` (manual engines: `{engine, started, pointer}` from `jbr handoff`). `spawn` exits 2 before launching anything when the engine key is not in `engines.json`. `compose-fix` writes `review-<WP>-round<N>.json` and `fix-<WP>-round<N>.md`.
 
 ## Calling the workflows from Claude Code
 
@@ -292,7 +356,7 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
   routing: { WP04: ["agy_claude_opus", "codex_astra", "claude_subagent"],   // routing.json .chains (list)
              WP05: "codex_astra",                  // string: pin, then the engineChain entries after it
              WP06: "auto" },                       // or omit the package: walk the whole engineChain (DEFAULT)
-  engineChain: ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "claude_subagent"],  // the default
+  engineChain: ["codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"],  // the default (no agy since 2026-10-24)
   engineArgs: { agy_gemini_pro: "--timeout 55m" },   // optional extra `jbr spawn` args per engine
   jbrArgs: "--engines /c/path/engines.json",          // optional global jbr options for probe + spawn
   fallbackEngine: "claude_subagent",     // optional; appended to every chain as the last resort

@@ -11,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from jbr import cli, paths, router, runner, state
-from tests.conftest import REPO
+from tests.conftest import AGY_CHAIN, AGY_ON, REPO
+
+AGY_FLAGS = [x for k in AGY_ON for x in ("--available", f"{k}=yes")]  # CLI opt-in to automated agy
 from tests.test_quota import AGY_QUOTA_LOG, _fake_engine, run_stub
 from tests.test_workflows import BUILD_DAG, NODE, run_workflow
 
@@ -26,7 +28,7 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
 @pytest.fixture
 def all_engines():
     """engines.json as shipped, cloud engines only: local and LAN Qwen off (their place in the chain has its own tests)."""
-    return router.load_engines(REPO / "engines.json", {"ollama_qwen": False, "lan_qwen": False})
+    return router.load_engines(REPO / "engines.json", {**AGY_ON, "ollama_qwen": False, "lan_qwen": False})
 
 
 class FakeRun:
@@ -182,7 +184,7 @@ def test_cli_probe_exit_codes_and_no_engine_call_while_exhausted(all_engines, mo
     calls = []
     monkeypatch.setattr(state.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or
                         subprocess.CompletedProcess(cmd, 0, "READY\n", ""))
-    assert cli.main(["probe", "agy_gemini_pro"]) == 0
+    assert cli.main(AGY_FLAGS + ["probe", "agy_gemini_pro"]) == 0
     assert capsys.readouterr().out.strip() == "AVAILABLE" and len(calls) == 1
     state.mark_exhausted("codex_astra", all_engines["codex_astra"], "2h")
     assert cli.main(["probe", "codex_astra"]) == 3
@@ -221,14 +223,14 @@ def test_pick_prefers_gemini_and_honours_exclude(all_engines):
 def test_cli_pick_prints_first_available(all_engines, monkeypatch, capsys):
     state.mark_exhausted("agy_gemini_pro", all_engines["agy_gemini_pro"], "1h")
     monkeypatch.setattr(state.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "READY", ""))
-    assert cli.main(["pick"]) == 0
+    assert cli.main(AGY_FLAGS + ["pick"]) == 0
     out, err = capsys.readouterr()
     assert out.strip() == "agy_claude_opus" and "agy_gemini_pro: EXHAUSTED" in err
-    assert cli.main(["pick", "--exclude", "agy_claude_opus,codex_astra"]) == 0
+    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra"]) == 0
     assert capsys.readouterr().out.strip() == "ollama_qwen"        # local Qwen before Claude's quota
-    assert cli.main(["pick", "--exclude", "agy_claude_opus,codex_astra,ollama_qwen"]) == 0
+    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,ollama_qwen"]) == 0
     assert capsys.readouterr().out.strip() == "lan_qwen"           # LAN Qwen next, still before Claude
-    assert cli.main(["pick", "--exclude", "agy_claude_opus,codex_astra,ollama_qwen,lan_qwen"]) == 0
+    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,ollama_qwen,lan_qwen"]) == 0
     assert capsys.readouterr().out.strip() == "claude_subagent"
 
 
@@ -400,7 +402,7 @@ def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, ca
     captured = {}
     monkeypatch.setattr(router.urllib.request, "urlopen", _jev(captured, lambda q, crit: "agy_claude_opus"))
     monkeypatch.setenv("TYPESAFE_API_KEY", "k-test")
-    assert cli.main(["--project", str(project), "route"]) == 0
+    assert cli.main(AGY_FLAGS + ["--project", str(project), "route"]) == 0
     out, err = capsys.readouterr()
     assert sorted(probed) == ["claude-opus-5-5-high", "gemini-3.1-pro-high", "gpt-6-astra",
                               "qwen3.8-flash-next-iq2_xs", "qwen3.8:27b-mlx"]
@@ -419,7 +421,7 @@ def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, ca
 # ----------------------------------------------------------------------------- build_dag.js chain
 
 
-JBR = {"root": "C:\\p", "jbr": "/c/jbr", "reportsDir": "/c/Users/me/.jbr/runs/C-p/reports"}
+JBR = {"root": "C:\\p", "jbr": "/c/jbr", "reportsDir": "/c/Users/me/.jbr/runs/C-p/reports", "engineChain": AGY_CHAIN}
 ONE = [{"id": "WP01", "depends_on": []}]
 
 

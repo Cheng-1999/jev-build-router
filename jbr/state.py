@@ -312,10 +312,10 @@ def _bin(name: str) -> str:
 
 
 def probe_command(engine: dict) -> list[str] | None:
-    """The cheap live-probe argv for an engine; None for claude_subagent."""
+    """The cheap live-probe argv for an engine; None for claude_subagent and manual engines."""
     engine = models.resolve(engine, agy_bin=_bin("agy"))  # "auto:<family>" -> the best id agy lists now
     r, model = engine.get("runner", "agy"), engine.get("model", "")
-    if r == "claude_subagent":
+    if r in ("claude_subagent", runner.MANUAL):
         return None
     if r == "agy":
         return [_bin("agy"), "--model", model, "--print-timeout", "45s", "--print", PROBE_PROMPT]
@@ -368,6 +368,9 @@ def probe(engine_key: str, engines: dict[str, dict], *, live: bool = True, now: 
     eng = engines[engine_key]
     if eng.get("runner") == "claude_subagent":
         return Probe(engine_key, AVAILABLE, detail="claude_subagent is never probed")
+    if eng.get("runner") == runner.MANUAL:
+        # never chosen by pick/route/the chain: only an explicit `jbr assign WP=<engine>` hands work to it
+        return Probe(engine_key, UNAVAILABLE, detail="manual: run by the user (jbr handoff / jbr done), never automatically")
     if not eng.get("available", True):
         return Probe(engine_key, UNAVAILABLE, detail="disabled (available=false / --available no)")
     p = path or state_path()

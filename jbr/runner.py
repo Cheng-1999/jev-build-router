@@ -8,9 +8,16 @@ Artifacts under paths.reports_dir(project) (~/.jbr/runs/<project key>/reports/ u
                              "-1 <minutes>min" (no status token; engine_status() reads it as crash)
   run-<WP>[-tag].stdout      stdout of a detached (spawned) run
   run-<WP>[-tag].last.md     codex only: final message (-o)
+  run-<WP>[-tag].handoff     manual engines only: JSON {engine, started, pointer} written by handoff()
 
 Engine `claude_subagent` is never executed here: build_command returns None and
 run() reports that the package belongs to the Claude Code workflow.
+
+Manual engines (runner "manual", e.g. agy_manual) are never executed either: Google's Antigravity
+terms (FAQ, 2026-10) do not support wrapping `agy` inside third-party coding agents on consumer plans,
+so jbr only writes the handoff packet (handoff()) and the user runs agy themselves, then records the
+outcome (mark_done()). The .done marker has the usual format, so `jbr wait`/`status` and
+review_level.js treat the package like any other run.
 """
 from __future__ import annotations
 
@@ -27,6 +34,9 @@ from typing import Any
 from jbr import models, paths
 
 RUN_PREFIX = "run"
+MANUAL = "manual"  # runner of engines the user drives by hand (agy_manual); jbr never executes them
+MANUAL_REFUSAL = ("manual engine: jbr never runs it. Write the packet with `python -m jbr handoff <WP> --engine <engine>`, "
+                  "run the engine yourself, then record the outcome with `python -m jbr done <WP>`")
 IS_WINDOWS = os.name == "nt"  # module constant so tests can flip it
 DEFAULT_TIMEOUT = "55m"
 DEFAULT_RULES = (
@@ -67,6 +77,7 @@ def report_paths(project_root: str | os.PathLike, wp_id: str, tag: str = "", rep
         "done": rep / f"{stem}.done",
         "stdout": rep / f"{stem}.stdout",
         "last": rep / f"{stem}.last.md",
+        "handoff": rep / f"{stem}.handoff",
     }
 
 
@@ -149,6 +160,8 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
     pointer = pointer_text(prompt_file, project_root)
     if runner == "claude_subagent":
         return None
+    if runner == MANUAL:
+        raise ValueError(MANUAL_REFUSAL)
     if runner == "codex":
         # OpenAI Codex CLI. workspace-write sandbox keeps it inside the repo.
         # `windows_sandbox`: on Windows the workspace-write shell can fail with "CryptUnprotectData
@@ -169,7 +182,7 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
             # agy rejects --effort for Claude thinking models (their thinking is the boost)
             cmd += ["--effort", effort]
         return cmd
-    raise ValueError(f"unknown runner {runner!r} (expected agy|codex|claude_subagent)")
+    raise ValueError(f"unknown runner {runner!r} (expected agy|codex|claude_subagent|manual)")
 
 
 # ----------------------------------------------------------------------------- classification
@@ -220,6 +233,10 @@ def _env(engine: dict | None = None) -> dict[str, str]:
     return env
 
 
+def is_manual(engine: dict | None) -> bool:
+    return (engine or {}).get("runner") == MANUAL
+
+
 def engine_env(engine: dict | None) -> dict[str, str]:
     """engines.json `env`: per-engine variables (`~` expanded), e.g. CODEX_HOME for lan_qwen's slim codex home."""
     return {k: os.path.expanduser(str(v)) for k, v in ((engine or {}).get("env") or {}).items()}
@@ -241,11 +258,14 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
     re-raised AFTER writing the .done marker as "-1 <minutes>min" and the traceback into the
     .log, so a poller waiting on the marker never hangs (dry-run: no marker is written).
     """
+    if is_manual(engines.get(engine_key)):
+        raise ValueError(f"{engine_key}: {MANUAL_REFUSAL}")  # before any marker: a manual package's .done is the user's
     root = pathlib.Path(project_root).resolve()
     paths = report_paths(root, wp_id, tag, reports_dir)
     paths["dir"].mkdir(parents=True, exist_ok=True)
     if paths["done"].exists():
         paths["done"].unlink()
+    paths["handoff"].unlink(missing_ok=True)  # an automatic run supersedes an earlier manual handoff
     result: dict[str, Any] = {"wp": wp_id, "engine": engine_key, "cmd": None, "exit": None, "minutes": 0.0,
                               "paths": {k: str(v) for k, v in paths.items()}}
     t0 = time.time()
@@ -321,6 +341,7 @@ def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag:
     paths["dir"].mkdir(parents=True, exist_ok=True)
     if paths["done"].exists():
         paths["done"].unlink()
+    paths["handoff"].unlink(missing_ok=True)  # `jbr done` must never fake this run's marker
     argv = [sys.executable, "-m", "jbr", "run", wp_id, "--project", str(root), *run_args]
     if tag and "--tag" not in run_args:
         argv += ["--tag", tag]
@@ -343,6 +364,250 @@ def launch_detached(argv: list[str], cwd: pathlib.Path, stdout_path: pathlib.Pat
     out = open(stdout_path, "w", encoding="utf-8")
     p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env, **kw)
     return p.pid
+
+
+# ----------------------------------------------------------------------------- manual engines
+
+
+def handoff(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: dict[str, dict],
+            packages_path: str | os.PathLike, prompts_dir: str | os.PathLike = "ops/prompts", *,
+            extra: str = "", tag: str = "", reports_dir: str | None = None, rules: str | None = None,
+            now: float | None = None) -> dict[str, Any]:
+    """Write the packet for a package the user runs by hand on a manual engine. Executes nothing.
+
+    Writes run-<WP>[-tag].prompt.md (same prompt `jbr run` would give the engine), a log header, and
+    the .handoff record; clears a stale .done so `jbr wait` / build_dag.js see the package as pending
+    until mark_done(). Returns {"wp", "engine", "pointer", "paths"}; pointer = the line to paste."""
+    if engine_key not in engines:
+        raise KeyError(f"unknown engine {engine_key!r}; known: {sorted(engines)}")
+    engine = engines[engine_key]
+    if not is_manual(engine):
+        raise ValueError(f"engine {engine_key} is not manual (runner {engine.get('runner')!r}); use `jbr run`/`spawn`")
+    root = pathlib.Path(project_root).resolve()
+    rp = report_paths(root, wp_id, tag, reports_dir)
+    packages, meta = load_packages(packages_path)
+    wp = find_package(packages, wp_id)  # before touching any file: an unknown package leaves nothing behind
+    rp["dir"].mkdir(parents=True, exist_ok=True)
+    if rp["done"].exists():
+        rp["done"].unlink()
+    rp["prompt"].write_text(compose_prompt(root, wp, prompts_dir, extra, rules or meta.get("rules")), encoding="utf-8")
+    pointer = pointer_text(rp["prompt"], root)
+    started = time.time() if now is None else now
+    rp["log"].write_text(f"# {engine_key} handoff {wp_id}{' tag=' + tag if tag else ''} model={engine.get('model', '')} "
+                         f"(run by the user, not by jbr)\n\n", encoding="utf-8")
+    rp["handoff"].write_text(json.dumps({"wp": wp_id, "tag": tag, "engine": engine_key, "started": started,
+                                         "pointer": pointer}, indent=2), encoding="utf-8")
+    return {"wp": wp_id, "engine": engine_key, "pointer": pointer, "paths": {k: str(v) for k, v in rp.items()}}
+
+
+def read_handoff(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None) -> dict | None:
+    f = report_paths(project_root, wp_id, tag, reports_dir)["handoff"]
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def mark_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None, *,
+              status: str = "OK", exit_code: int | None = None, minutes: float | None = None, notes: str = "",
+              force: bool = False, now: float | None = None) -> dict[str, Any]:
+    """Record the outcome of a handed-off package: append `notes` (the engine's final report, pasted by
+    the user) to the log, write the .done marker. minutes default: time since the handoff.
+    status OK | CRASH | QUOTA (CRASH/QUOTA = the engine did no usable work: not reviewed).
+    An existing .done marker is kept unless force=True (a second `done` would rewrite a recorded outcome)."""
+    status = status.upper()
+    if status not in {"OK", "CRASH", "QUOTA"}:
+        raise ValueError(f"status must be OK, CRASH or QUOTA, got {status!r}")
+    if minutes is not None and minutes < 0:
+        raise ValueError(f"minutes must be >= 0, got {minutes}")
+    h = read_handoff(project_root, wp_id, tag, reports_dir)
+    if h is None:
+        stem = f"{wp_id}{'-' + tag if tag else ''}"
+        raise ValueError(f"no handoff for {stem}: run `python -m jbr handoff {wp_id}{' --tag ' + tag if tag else ''}` first")
+    rp = report_paths(project_root, wp_id, tag, reports_dir)
+    if rp["done"].exists() and not force:
+        raise ValueError(f"{rp['done'].name} already exists ({rp['done'].read_text(encoding='utf-8').strip()}); "
+                         "pass --force to overwrite it")
+    if minutes is None:
+        minutes = max(0.0, ((time.time() if now is None else now) - float(h.get("started") or 0)) / 60)
+    if exit_code is None:
+        exit_code = 0 if status == "OK" else 1
+    with open(rp["log"], "a", encoding="utf-8") as fh:
+        fh.write(f"# recorded by the user: {status} exit={exit_code} {minutes:.1f}min\n")
+        if notes.strip():
+            fh.write("\n" + notes.strip() + "\n")
+    rp["done"].write_text(f"{exit_code} {minutes:.1f}min {status}\n", encoding="utf-8")
+    return {"wp": wp_id, "tag": tag, "engine": h.get("engine"), "status": status, "exit": exit_code,
+            "minutes": round(minutes, 1), "marker": str(rp["done"]), "log": str(rp["log"])}
+
+
+PENDING_FILE = "handoff-pending.md"
+REPORT_RE = re.compile(r"^=+ *REPORT +([^\s=]+) *=+[ \t]*$(.*?)^=+ *END +\1 *=+[ \t]*$", re.MULTILINE | re.DOTALL)
+REPORT_STATUS_RE = re.compile(r"^\s*status\s*:\s*[*_`\"']*([A-Za-z]+)", re.IGNORECASE | re.MULTILINE)  # **done** too
+
+
+def _topo(packages: list[dict]) -> dict[str, int]:
+    """Package id -> build order (deps first, plan order on ties)."""
+    order: dict[str, int] = {}
+    deps = {w["id"]: list(w.get("depends_on") or []) for w in packages}
+
+    def visit(pid: str, stack: tuple[str, ...] = ()) -> None:
+        if pid in order or pid in stack or pid not in deps:
+            return
+        for d in deps[pid]:
+            visit(d, stack + (pid,))
+        order[pid] = len(order)
+
+    for w in packages:
+        visit(w["id"])
+    return order
+
+
+def has_ok_run(project_root: str | os.PathLike, wp_id: str, known_ids: list[str], reports_dir: str | None = None) -> bool:
+    """True when any run of the package (any tag) ended OK: its code exists on disk."""
+    rep = paths.reports_dir(project_root, reports_dir)
+    for f in rep.glob(f"{RUN_PREFIX}-{wp_id}*.done") if rep.exists() else []:
+        wp, tag = split_stem(f.name[len(RUN_PREFIX) + 1:-len(".done")], known_ids)
+        d = read_done(project_root, wp, tag, reports_dir) if wp == wp_id else None
+        if d and engine_status(d) == "ok":
+            return True
+    return False
+
+
+def pending_manual(project_root: str | os.PathLike, packages: list[dict], routing: dict[str, str],
+                   engines: dict[str, dict], reports_dir: str | None = None, done: set[str] | None = None) -> list[dict]:
+    """Manual work the user still has to run, in dependency order: every .handoff without a .done (any tag,
+    e.g. fix rounds), plus every package routed to a manual engine that was never handed off nor finished.
+    [{"wp", "tag", "engine", "existing": bool, "blocked_on": [dep, ...]}]. An item is blocked when a dependency
+    is neither earlier on the list (unblocked), nor has an OK run, nor is in `done` (built elsewhere, e.g. by a
+    Claude subagent, which leaves no run marker); blocking is transitive. Fix rounds (tagged) are never blocked."""
+    rep = paths.reports_dir(project_root, reports_dir)
+    ids = [w["id"] for w in packages]
+    out: dict[tuple[str, str], dict] = {}
+    for f in sorted(rep.glob(f"{RUN_PREFIX}-*.handoff")) if rep.exists() else []:
+        wp, tag = split_stem(f.name[len(RUN_PREFIX) + 1:-len(".handoff")], ids)
+        h = read_handoff(project_root, wp, tag, reports_dir)
+        if h and wp in ids and read_done(project_root, wp, tag, reports_dir) is None:
+            out[(wp, tag)] = {"wp": wp, "tag": tag, "engine": h.get("engine"), "existing": True}
+    for wp in ids:
+        eng = routing.get(wp)
+        if (eng in engines and is_manual(engines[eng]) and not any(k[0] == wp for k in out)  # an open fix round counts
+                and read_handoff(project_root, wp, "", reports_dir) is None
+                and read_done(project_root, wp, "", reports_dir) is None):
+            out[(wp, "")] = {"wp": wp, "tag": "", "engine": eng, "existing": False}
+    order = _topo(packages)
+    items = sorted(out.values(), key=lambda i: (order.get(i["wp"], 1 << 30), i["tag"]))
+    deps = {w["id"]: list(w.get("depends_on") or []) for w in packages}
+    done = set(done or ())
+    ready: set[str] = set()
+    for it in items:
+        # a fix round works on code that exists already: its dependencies were met in round 0
+        it["blocked_on"] = [] if it["tag"] else [
+            d for d in deps.get(it["wp"], []) if d in deps and d not in ready and d not in done
+            and not has_ok_run(project_root, d, ids, reports_dir)]
+        if not it["blocked_on"]:
+            ready.add(it["wp"])
+    return items
+
+
+def _label(wp: str, tag: str) -> str:
+    return f"{wp}-{tag}" if tag else wp
+
+
+def handoff_pending(project_root: str | os.PathLike, engines: dict[str, dict], packages_path: str | os.PathLike,
+                    prompts_dir: str | os.PathLike = "ops/prompts", routing: dict[str, str] | None = None, *,
+                    reports_dir: str | None = None, inline: bool = False, done: set[str] | None = None,
+                    now: float | None = None) -> dict[str, Any]:
+    """One checklist for every pending manual package, so a single engine session the user starts works
+    through them in order. New packages get their packet (handoff()); packets already handed off are reused
+    as they are (their start time and any fix instructions kept). Writes <reports>/handoff-pending.md.
+    inline=True puts each packet's text in the checklist (for engines that cannot read ~/.jbr). Blocked items
+    (an unbuilt dependency, see pending_manual) are listed as "do not start" and get no packet yet.
+    Returns {"items", "blocked", "path", "pointer", "text"}; nothing ready -> no file written."""
+    root = pathlib.Path(project_root).resolve()
+    packages, meta = load_packages(packages_path)
+    found = pending_manual(root, packages, routing or {}, engines, reports_dir, done)
+    items = [i for i in found if not i["blocked_on"]]
+    blocked = [i for i in found if i["blocked_on"]]
+    rep = paths.reports_dir(root, reports_dir)
+    batch = rep / PENDING_FILE
+    if not items:
+        batch.unlink(missing_ok=True)
+        return {"items": [], "blocked": blocked, "path": None, "pointer": "", "text": ""}
+    for it in items:
+        if not it["existing"]:
+            handoff(root, it["wp"], it["engine"], engines, packages_path, prompts_dir, reports_dir=reports_dir,
+                    rules=meta.get("rules"), now=now)
+        it["prompt"] = str(report_paths(root, it["wp"], it["tag"], reports_dir)["prompt"])
+    titles = {w["id"]: w.get("title", "") for w in packages}
+    deps = {w["id"]: list(w.get("depends_on") or []) for w in packages}
+    lines = [
+        f"You have {len(items)} work package{'s' if len(items) != 1 else ''} to do, ONE AT A TIME, in the order below.",
+        f"Repository root: {root}. Work only inside it.",
+        "",
+        "For each package, in order:",
+        "1. Read its packet in full" + (" (below)" if inline else " (the file named next to it)")
+        + " and carry out every instruction in it.",
+        "2. Finish it completely, with its tests green, before you start the next one.",
+        "3. Then print exactly this block, with <id> = the package's REPORT ID shown below (fill in the values),",
+        "   and only then go on:",
+        "   === REPORT <id> ===",
+        "   status: done        (or: failed, when you could not do it)",
+        "   tests: <the final test summary line>",
+        "   files: <files you created or changed>",
+        "   unsatisfied: <acceptance items you could not meet, or none>",
+        "   === END <id> ===",
+        "If a package fails, report it and skip every later package that depends on it.",
+        "",
+        "PACKAGES",
+    ]
+    for n, it in enumerate(items, 1):
+        lab = _label(it["wp"], it["tag"])
+        dep = [d for d in deps.get(it["wp"], [])]
+        lines.append(f"{n}. {lab}: {titles.get(it['wp'], '')}" + (f" (depends on {', '.join(dep)})" if dep else "")
+                     + f"\n   REPORT ID: {lab}" + ("" if inline else f"\n   packet: {it['prompt']}"))
+    if blocked:
+        lines += ["", "NOT YET (do not start these: a package they depend on is not built)"]
+        lines += [f"- {_label(i['wp'], i['tag'])}: waits on {', '.join(i['blocked_on'])}" for i in blocked]
+    if inline:
+        for it in items:
+            lab = _label(it["wp"], it["tag"])
+            lines += ["", f"######## PACKET {lab} ########", pathlib.Path(it["prompt"]).read_text(encoding="utf-8"),
+                      f"######## END PACKET {lab} ########"]
+    text = "\n".join(lines) + "\n"
+    batch.write_text(text, encoding="utf-8")
+    pointer = (f"Your complete instructions are in the file {batch}. Read that file in full with your file-read tool "
+               f"before doing anything else, then carry out every instruction in it. Work only inside {root}.")
+    return {"items": items, "blocked": blocked, "path": str(batch), "pointer": pointer, "text": text}
+
+
+def resolve_report(project_root: str | os.PathLike, label: str, known_ids: list[str],
+                   reports_dir: str | None = None) -> tuple[str, str] | None:
+    """The (wp, tag) a REPORT label belongs to, or None when it is ambiguous / nothing is open. An exact
+    label (WP03-fix1) wins. A bare id whose round 0 is already recorded maps to its one open tagged handoff
+    (engines often write REPORT WP03 for a fix round, since the packet says "work package WP03")."""
+    wp, tag = split_stem(label, known_ids)
+    if tag or read_done(project_root, wp, "", reports_dir) is None:
+        return wp, tag
+    rep = paths.reports_dir(project_root, reports_dir)
+    open_tags = []
+    for f in rep.glob(f"{RUN_PREFIX}-{wp}-*.handoff") if rep.exists() else []:
+        w, t = split_stem(f.name[len(RUN_PREFIX) + 1:-len(".handoff")], known_ids)
+        if w == wp and t and read_done(project_root, w, t, reports_dir) is None:
+            open_tags.append(t)
+    return (wp, open_tags[0]) if len(open_tags) == 1 else None
+
+
+def parse_reports(text: str) -> dict[str, dict[str, str]]:
+    """=== REPORT <id> === ... === END <id> === blocks -> {id: {"status": OK|CRASH, "notes": block}}.
+    status `done` (or ok) -> OK; anything else (failed, blocked, missing) -> CRASH (not reviewed)."""
+    out = {}
+    for m in REPORT_RE.finditer(text or ""):
+        body = m.group(2).strip()
+        st = REPORT_STATUS_RE.search(body)
+        word = st.group(1).lower() if st else ""
+        out[m.group(1)] = {"status": "OK" if word in {"done", "ok"} else "CRASH", "notes": body}
+    return out
 
 
 def read_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None) -> dict | None:
