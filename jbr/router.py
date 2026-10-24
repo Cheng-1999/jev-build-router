@@ -41,13 +41,14 @@ DEFAULT_GOAL = (
     "reviewed by fresh Claude reviewers with adversarial refutation and up to 2 fix rounds regardless of engine."
 )
 CHAIN_POLICY = (
-    "Engine chain: engines are ranked by `priority` (1 = most preferred; the user's default order is agy Gemini, "
-    "agy Claude Opus, Codex, local Qwen, Claude subagent as last resort). Prefer the highest-priority engine that is available "
+    "Engine chain: engines are ranked by `priority` (1 = most preferred; the user's default order is Codex, "
+    "local Qwen, Claude subagent as last resort; automated agy is off by default). Prefer the highest-priority engine that is available "
     "now, unless this package's routing hints (numerical difficulty, state consistency / sign-convention "
     "criticality, size) clearly favour another available engine. Never choose an engine whose live_status is "
     "EXHAUSTED or UNAVAILABLE: it is out of quota or broken right now and is not offered as an answer."
 )
 LAST_RESORT = "claude_subagent"
+MANUAL = "manual"  # runner of engines the user drives by hand (runner.MANUAL); never in an automatic chain
 USABLE_STATUSES = {"AVAILABLE", "UNKNOWN"}  # UNKNOWN = not probed (offline / dry-run)
 SCHEDULING_NOTE = (
     "depth = position in the dependency chain; depth 1 starts now, each further level starts roughly "
@@ -95,9 +96,14 @@ def by_priority(engines: dict[str, dict]) -> list[str]:
     return sorted(keys, key=lambda k: (engines[k].get("priority", 99), keys.index(k)))
 
 
+def is_manual(eng: dict) -> bool:
+    return eng.get("runner") == MANUAL
+
+
 def usable_engines(engines: dict[str, dict], availability: dict[str, dict] | None = None) -> dict[str, dict]:
-    """Available engines (engines.json / --available) minus those whose live probe is not usable."""
-    avail = available_engines(engines)
+    """Available engines (engines.json / --available) minus those whose live probe is not usable.
+    Manual engines are never usable for automatic routing: only `assign` hands work to them."""
+    avail = {k: v for k, v in available_engines(engines).items() if not is_manual(v)}
     if availability is None:
         return avail
     return {k: v for k, v in avail.items() if availability.get(k, {}).get("status", "UNKNOWN") in USABLE_STATUSES}
@@ -120,6 +126,8 @@ def chain_for(pick: str, engines: dict[str, dict], availability: dict[str, dict]
     """Jev's pick first, then the other usable engines by priority, ending in claude_subagent."""
     if pick == LAST_RESORT:  # never quota-limited: nothing after it would ever run
         return [LAST_RESORT]
+    if pick in engines and is_manual(engines[pick]):  # the user runs it: no automatic fallback behind it
+        return [pick]
     usable = usable_engines(engines, availability)
     chain = [pick] + [k for k in by_priority(engines) if k in usable and k not in (pick, LAST_RESORT)]
     if LAST_RESORT in engines and LAST_RESORT not in chain:
@@ -183,17 +191,18 @@ def build_request(packages: list[dict], engines: dict[str, dict], extra_state: d
     avail = usable_engines(engines, availability)
     if not avail:
         raise ValueError("no engine is available; use --available <engine>=yes")
+    auto = {k: e for k, e in engines.items() if not is_manual(e)}  # Jev never sees the engines the user runs by hand
     state: dict[str, Any] = {
         "goal": DEFAULT_GOAL,
         "engines": {k: engine_description(k, e, None if availability is None else availability.get(k, {}))
-                    for k, e in engines.items()},
+                    for k, e in auto.items()},
         "packages": package_attrs(packages, done),
         "scheduling_note": SCHEDULING_NOTE,
     }
-    if any("priority" in e for e in engines.values()):
+    if any("priority" in e for e in auto.values()):
         state["routing_policy"] = CHAIN_POLICY
         state["engine_chain"] = [{"engine": k, "priority": engines[k].get("priority"),
-                                  "live_status": live_status(k, engines, availability)} for k in by_priority(engines)]
+                                  "live_status": live_status(k, engines, availability)} for k in by_priority(auto)]
     state.update(extra_state or {})
     questions = {}
     for wp in state["packages"]:
@@ -263,7 +272,9 @@ def assign(project_root: str | os.PathLike, assignments: dict[str, str], engines
     for wp, eng in assignments.items():
         if eng not in engines:
             raise ValueError(f"{wp}: unknown engine {eng!r}; known: {sorted(engines)}")
-        if eng not in usable and eng != LAST_RESORT:
+        if not engines[eng].get("available", True) and is_manual(engines[eng]):
+            raise ValueError(f"{wp}: engine {eng} is disabled (available=false / --available no); assign another")
+        if eng not in usable and eng != LAST_RESORT and not is_manual(engines[eng]):
             live = (availability or {}).get(eng, {})
             raise ValueError(f"{wp}: engine {eng} is not usable now ({live.get('status', 'disabled')}"
                              f"{' until ' + live['until'] if live.get('until') else ''}); assign another")

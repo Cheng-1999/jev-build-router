@@ -2,13 +2,20 @@
 // Implement (Claude subagent or external engine via jbr), fresh-context review, adversarial
 // refutation, fix loop, per package.
 //
-// Engine chain: every implement/fix step walks the package's chain (default agy_gemini_pro >
-// agy_claude_opus > codex_astra > claude_subagent). Before spawning an external engine its runner
+// Engine chain: every implement/fix step walks the package's chain (default codex_astra >
+// ollama_qwen > lan_qwen > claude_subagent; automated agy is off since 2026-10-24). Before spawning an external engine its runner
 // agent runs `python -m jbr probe <engine>` (shared state file ~/.jbr/engine_state.json + a cheap
 // live probe, AVAILABLE cached 10 min): EXHAUSTED/UNAVAILABLE -> engine_status 'quota' without
 // spawning, and the step moves to the next engine. There is NO run-wide skip list: every step
 // asks `jbr probe` again, so an engine whose quota has reset is preferred again later in the
 // same run. Quota/crash runs are never reviewed and never consume a fix round.
+//
+// Manual engines (args.manualEngines, default ['agy_manual']): the user runs them by hand (Google's
+// Antigravity terms do not support wrapping agy in third-party agents on consumer plans). A package
+// whose routing PINS a manual engine is never implemented here: its row is final 'manual' with the
+// `jbr handoff` command, and every package depending on it ends 'waiting'. Nothing is spawned or
+// polled for them; after `jbr done` they go through review_level.js. A manual engine anywhere else
+// in a chain (or in engineChain) is dropped: the automatic chain never hands work to the user.
 //
 // Everything project-specific comes from `args`:
 //
@@ -21,11 +28,12 @@
 //   routing: { WP04: 'claude_subagent',       // pin: that engine first, then the engineChain entries after it
 //              WP05: ['agy_gemini_pro', 'codex_astra', 'claude_subagent'],  // explicit chain (ops/routing.json .chains)
 //              WP06: 'auto' },                // or no entry at all (the DEFAULT): walk engineChain
-//   engineChain: ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', 'lan_qwen', 'claude_subagent'],  // default priority order
+//   engineChain: ['codex_astra', 'ollama_qwen', 'lan_qwen', 'claude_subagent'],  // default priority order (no agy since 2026-10-24)
 //   engineWaits: { ollama_qwen: 16 },          // 8.75-minute marker waits per engine before CRASH (default 8 = ~70 min; local/LAN Qwen 16)
 //   engineArgs: { agy_gemini_pro: '--timeout 55m' },   // extra `python -m jbr spawn` args per engine (optional)
 //   jbrArgs: '--engines /c/path/engines.json',          // global jbr options for probe + spawn (optional)
 //   fallbackEngine: 'claude_subagent',        // appended to every chain as the last resort (default claude_subagent)
+//   manualEngines: ['agy_manual'],            // engines the user runs by hand (see above)
 //   maxFixRounds: 2,
 //   promptsDir: 'ops/prompts',               // absolute, or relative to root
 //   reportsDir: '/Users/me/.jbr/runs/<key>/reports',  // REQUIRED with external engines: `python -m jbr --project <root> paths` .reports_dir
@@ -72,31 +80,38 @@ const ENGINE_ARGS = A.engineArgs || {}
 const JBR_ARGS = (A.jbrArgs ? ' ' + A.jbrArgs : '') + (REPORTS ? ` --reports "${REPORTS}"` : '')
 const RUN_PREFIX = 'run'
 const LAST_RESORT = 'claude_subagent'
-const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'ollama_qwen', 'lan_qwen', LAST_RESORT]
+// automated agy is off by default (2026-10-24, Antigravity terms): list agy_* in args.engineChain to opt back in
+const DEFAULT_CHAIN = ['codex_astra', 'ollama_qwen', 'lan_qwen', LAST_RESORT]
 const ENGINE_CHAIN = Array.isArray(A.engineChain) && A.engineChain.length ? A.engineChain : DEFAULT_CHAIN
 const ENGINE_WAITS = Object.assign({ ollama_qwen: 16, lan_qwen: 16 }, A.engineWaits || {})
 const FALLBACK = A.fallbackEngine || LAST_RESORT
 const PRE = A.preReview ? Object.assign({ rounds: 'first', effort: 'low', budgetMin: 45 }, A.preReview === true ? {} : A.preReview) : null
 const PRE_WAITS = PRE ? Math.ceil(PRE.budgetMin / 8.5) + 1 : 0   // jbr enforces the budget, so the marker always comes
-const isExternal = e => e !== LAST_RESORT
+const MANUAL = new Set(Array.isArray(A.manualEngines) ? A.manualEngines : ['agy_manual'])
+const isExternal = e => e !== LAST_RESORT && !MANUAL.has(e)
 const uniq = xs => [...new Set(xs.filter(Boolean))]
+const auto = es => es.filter(e => !MANUAL.has(e))   // the automatic part of a chain
 // chain-derived engines (auto / after a pin) need args.jbr when external; without it they are dropped
 const fromChain = es => JBR ? es : es.filter(e => !isExternal(e))
 if (!JBR && ENGINE_CHAIN.some(isExternal)) log(`args.jbr not set: external engines dropped from the engine chain (${ENGINE_CHAIN.filter(isExternal).join(', ')}); auto-routed packages run on ${LAST_RESORT}`)
 // routing entry per package: string (pin, then the chain after it) | array (explicit chain) | 'auto' / missing (whole chain)
 function chainFor(id) {
   const r = ROUTING[id]
+  const head = Array.isArray(r) ? r[0] : r
+  if (MANUAL.has(head)) return [head]   // the user runs it: no automatic fallback behind it
   let c
-  if (Array.isArray(r) && r.length) c = r
-  else if (!r || r === 'auto') c = fromChain(ENGINE_CHAIN)
+  if (Array.isArray(r) && r.length) c = auto(r)
+  else if (!r || r === 'auto') c = fromChain(auto(ENGINE_CHAIN))
   else {
     const i = ENGINE_CHAIN.indexOf(r)
-    c = [r, ...fromChain(i >= 0 ? ENGINE_CHAIN.slice(i + 1) : ENGINE_CHAIN)]
+    c = [r, ...fromChain(auto(i >= 0 ? ENGINE_CHAIN.slice(i + 1) : ENGINE_CHAIN))]
   }
   return uniq([...c, FALLBACK])
 }
 const CHAINS = Object.fromEntries(Object.keys(PKGS).map(id => [id, chainFor(id)]))
 const engineOf = id => CHAINS[id][0]
+const isManualPkg = id => MANUAL.has(engineOf(id))
+const handoffCmd = id => `cd ${POSIX} && PYTHONPATH="${JBR || '<jev-build-router>'}" python -m jbr --prompts "${PROMPTS}"${JBR_ARGS} --project "${POSIX}" handoff ${id} --engine ${engineOf(id)}`
 if (!JBR && Object.values(CHAINS).some(c => c.some(isExternal))) throw new Error('args.jbr (POSIX path of jev-build-router) is required when a package is routed to an external engine')
 if (!REPORTS && Object.values(CHAINS).some(c => c.some(isExternal))) throw new Error('args.reportsDir is required when a package is routed to an external engine: take .reports_dir from `python -m jbr --project <root> paths` (jbr keeps run files outside the project)')
 // every dependency must be a package in this run or already done; a silent drop would start a package with its dep unbuilt
@@ -262,7 +277,22 @@ async function step(id, kind, round, findings) {
 
 const triedText = tried => tried.map(t => `${t.engine}=${t.status}`).join(', ')
 
+// A manual package: nothing runs here. The row tells the user what to paste; review_level.js takes over after `jbr done`.
+function manualRow(id) {
+  log(`${id}: MANUAL on ${engineOf(id)}: not implemented by this workflow; run: ${handoffCmd(id)}`)
+  return { wp: id, engine: engineOf(id), chain: CHAINS[id], final: 'manual', rounds: 0,
+    history: [{ stage: 'impl', engines: [{ engine: engineOf(id), status: 'manual', reset_hint: '' }], summary: 'handed off to the user', unsatisfied: [] }],
+    unresolved: [], low_open: [], mutation: '', ownership: [], handoff: handoffCmd(id) }
+}
+
+function waitingRow(id, on) {
+  log(`${id}: WAITING on ${on.join(', ')} (handed off / waiting): not started`)
+  return { wp: id, engine: engineOf(id), chain: CHAINS[id], final: 'waiting', rounds: 0, history: [],
+    unresolved: [], low_open: [], mutation: '', ownership: [], waiting_on: on }
+}
+
 async function build(id) {
+  if (isManualPkg(id)) return manualRow(id)
   log(`${id}: implementing; engine chain ${CHAINS[id].join(' > ')}`)
   const s = await step(id, 'impl', 0, [])
   const impl = s.res
@@ -296,13 +326,16 @@ async function build(id) {
   return row(r.verdict, round, r, {})
 }
 
-// DAG scheduler: each package starts the moment all its deps have finished (accepted or not).
+// DAG scheduler: each package starts the moment all its deps have finished (accepted or not), except
+// that a dep handed off to the user (or waiting on one) has no code yet: its dependents wait too.
 const P = {}
 const start = id => {
   if (P[id]) return P[id]
   P[id] = (async () => {
-    await Promise.all(PKGS[id].filter(d => !DONE.has(d)).map(d => start(d)))
-    return build(id)
+    const deps = PKGS[id].filter(d => !DONE.has(d))
+    const rows = await Promise.all(deps.map(d => start(d)))
+    const on = deps.filter((d, i) => rows[i] && ['manual', 'waiting'].includes(rows[i].final))
+    return on.length ? waitingRow(id, on) : build(id)
   })()
   return P[id]
 }

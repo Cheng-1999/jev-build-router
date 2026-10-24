@@ -8,9 +8,16 @@ Artifacts under paths.reports_dir(project) (~/.jbr/runs/<project key>/reports/ u
                              "-1 <minutes>min" (no status token; engine_status() reads it as crash)
   run-<WP>[-tag].stdout      stdout of a detached (spawned) run
   run-<WP>[-tag].last.md     codex only: final message (-o)
+  run-<WP>[-tag].handoff     manual engines only: JSON {engine, started, pointer} written by handoff()
 
 Engine `claude_subagent` is never executed here: build_command returns None and
 run() reports that the package belongs to the Claude Code workflow.
+
+Manual engines (runner "manual", e.g. agy_manual) are never executed either: Google's Antigravity
+terms (FAQ, 2026-10) do not support wrapping `agy` inside third-party coding agents on consumer plans,
+so jbr only writes the handoff packet (handoff()) and the user runs agy themselves, then records the
+outcome (mark_done()). The .done marker has the usual format, so `jbr wait`/`status` and
+review_level.js treat the package like any other run.
 """
 from __future__ import annotations
 
@@ -27,6 +34,9 @@ from typing import Any
 from jbr import models, paths
 
 RUN_PREFIX = "run"
+MANUAL = "manual"  # runner of engines the user drives by hand (agy_manual); jbr never executes them
+MANUAL_REFUSAL = ("manual engine: jbr never runs it. Write the packet with `python -m jbr handoff <WP> --engine <engine>`, "
+                  "run the engine yourself, then record the outcome with `python -m jbr done <WP>`")
 IS_WINDOWS = os.name == "nt"  # module constant so tests can flip it
 DEFAULT_TIMEOUT = "55m"
 DEFAULT_RULES = (
@@ -67,6 +77,7 @@ def report_paths(project_root: str | os.PathLike, wp_id: str, tag: str = "", rep
         "done": rep / f"{stem}.done",
         "stdout": rep / f"{stem}.stdout",
         "last": rep / f"{stem}.last.md",
+        "handoff": rep / f"{stem}.handoff",
     }
 
 
@@ -149,6 +160,8 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
     pointer = pointer_text(prompt_file, project_root)
     if runner == "claude_subagent":
         return None
+    if runner == MANUAL:
+        raise ValueError(MANUAL_REFUSAL)
     if runner == "codex":
         # OpenAI Codex CLI. workspace-write sandbox keeps it inside the repo.
         # `windows_sandbox`: on Windows the workspace-write shell can fail with "CryptUnprotectData
@@ -169,7 +182,7 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
             # agy rejects --effort for Claude thinking models (their thinking is the boost)
             cmd += ["--effort", effort]
         return cmd
-    raise ValueError(f"unknown runner {runner!r} (expected agy|codex|claude_subagent)")
+    raise ValueError(f"unknown runner {runner!r} (expected agy|codex|claude_subagent|manual)")
 
 
 # ----------------------------------------------------------------------------- classification
@@ -220,6 +233,10 @@ def _env(engine: dict | None = None) -> dict[str, str]:
     return env
 
 
+def is_manual(engine: dict | None) -> bool:
+    return (engine or {}).get("runner") == MANUAL
+
+
 def engine_env(engine: dict | None) -> dict[str, str]:
     """engines.json `env`: per-engine variables (`~` expanded), e.g. CODEX_HOME for lan_qwen's slim codex home."""
     return {k: os.path.expanduser(str(v)) for k, v in ((engine or {}).get("env") or {}).items()}
@@ -241,11 +258,14 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
     re-raised AFTER writing the .done marker as "-1 <minutes>min" and the traceback into the
     .log, so a poller waiting on the marker never hangs (dry-run: no marker is written).
     """
+    if is_manual(engines.get(engine_key)):
+        raise ValueError(f"{engine_key}: {MANUAL_REFUSAL}")  # before any marker: a manual package's .done is the user's
     root = pathlib.Path(project_root).resolve()
     paths = report_paths(root, wp_id, tag, reports_dir)
     paths["dir"].mkdir(parents=True, exist_ok=True)
     if paths["done"].exists():
         paths["done"].unlink()
+    paths["handoff"].unlink(missing_ok=True)  # an automatic run supersedes an earlier manual handoff
     result: dict[str, Any] = {"wp": wp_id, "engine": engine_key, "cmd": None, "exit": None, "minutes": 0.0,
                               "paths": {k: str(v) for k, v in paths.items()}}
     t0 = time.time()
@@ -321,6 +341,7 @@ def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag:
     paths["dir"].mkdir(parents=True, exist_ok=True)
     if paths["done"].exists():
         paths["done"].unlink()
+    paths["handoff"].unlink(missing_ok=True)  # `jbr done` must never fake this run's marker
     argv = [sys.executable, "-m", "jbr", "run", wp_id, "--project", str(root), *run_args]
     if tag and "--tag" not in run_args:
         argv += ["--tag", tag]
@@ -343,6 +364,81 @@ def launch_detached(argv: list[str], cwd: pathlib.Path, stdout_path: pathlib.Pat
     out = open(stdout_path, "w", encoding="utf-8")
     p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env, **kw)
     return p.pid
+
+
+# ----------------------------------------------------------------------------- manual engines
+
+
+def handoff(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: dict[str, dict],
+            packages_path: str | os.PathLike, prompts_dir: str | os.PathLike = "ops/prompts", *,
+            extra: str = "", tag: str = "", reports_dir: str | None = None, rules: str | None = None,
+            now: float | None = None) -> dict[str, Any]:
+    """Write the packet for a package the user runs by hand on a manual engine. Executes nothing.
+
+    Writes run-<WP>[-tag].prompt.md (same prompt `jbr run` would give the engine), a log header, and
+    the .handoff record; clears a stale .done so `jbr wait` / build_dag.js see the package as pending
+    until mark_done(). Returns {"wp", "engine", "pointer", "paths"}; pointer = the line to paste."""
+    if engine_key not in engines:
+        raise KeyError(f"unknown engine {engine_key!r}; known: {sorted(engines)}")
+    engine = engines[engine_key]
+    if not is_manual(engine):
+        raise ValueError(f"engine {engine_key} is not manual (runner {engine.get('runner')!r}); use `jbr run`/`spawn`")
+    root = pathlib.Path(project_root).resolve()
+    rp = report_paths(root, wp_id, tag, reports_dir)
+    packages, meta = load_packages(packages_path)
+    wp = find_package(packages, wp_id)  # before touching any file: an unknown package leaves nothing behind
+    rp["dir"].mkdir(parents=True, exist_ok=True)
+    if rp["done"].exists():
+        rp["done"].unlink()
+    rp["prompt"].write_text(compose_prompt(root, wp, prompts_dir, extra, rules or meta.get("rules")), encoding="utf-8")
+    pointer = pointer_text(rp["prompt"], root)
+    started = time.time() if now is None else now
+    rp["log"].write_text(f"# {engine_key} handoff {wp_id}{' tag=' + tag if tag else ''} model={engine.get('model', '')} "
+                         f"(run by the user, not by jbr)\n\n", encoding="utf-8")
+    rp["handoff"].write_text(json.dumps({"wp": wp_id, "tag": tag, "engine": engine_key, "started": started,
+                                         "pointer": pointer}, indent=2), encoding="utf-8")
+    return {"wp": wp_id, "engine": engine_key, "pointer": pointer, "paths": {k: str(v) for k, v in rp.items()}}
+
+
+def read_handoff(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None) -> dict | None:
+    f = report_paths(project_root, wp_id, tag, reports_dir)["handoff"]
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def mark_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None, *,
+              status: str = "OK", exit_code: int | None = None, minutes: float | None = None, notes: str = "",
+              force: bool = False, now: float | None = None) -> dict[str, Any]:
+    """Record the outcome of a handed-off package: append `notes` (the engine's final report, pasted by
+    the user) to the log, write the .done marker. minutes default: time since the handoff.
+    status OK | CRASH | QUOTA (CRASH/QUOTA = the engine did no usable work: not reviewed).
+    An existing .done marker is kept unless force=True (a second `done` would rewrite a recorded outcome)."""
+    status = status.upper()
+    if status not in {"OK", "CRASH", "QUOTA"}:
+        raise ValueError(f"status must be OK, CRASH or QUOTA, got {status!r}")
+    if minutes is not None and minutes < 0:
+        raise ValueError(f"minutes must be >= 0, got {minutes}")
+    h = read_handoff(project_root, wp_id, tag, reports_dir)
+    if h is None:
+        stem = f"{wp_id}{'-' + tag if tag else ''}"
+        raise ValueError(f"no handoff for {stem}: run `python -m jbr handoff {wp_id}{' --tag ' + tag if tag else ''}` first")
+    rp = report_paths(project_root, wp_id, tag, reports_dir)
+    if rp["done"].exists() and not force:
+        raise ValueError(f"{rp['done'].name} already exists ({rp['done'].read_text(encoding='utf-8').strip()}); "
+                         "pass --force to overwrite it")
+    if minutes is None:
+        minutes = max(0.0, ((time.time() if now is None else now) - float(h.get("started") or 0)) / 60)
+    if exit_code is None:
+        exit_code = 0 if status == "OK" else 1
+    with open(rp["log"], "a", encoding="utf-8") as fh:
+        fh.write(f"# recorded by the user: {status} exit={exit_code} {minutes:.1f}min\n")
+        if notes.strip():
+            fh.write("\n" + notes.strip() + "\n")
+    rp["done"].write_text(f"{exit_code} {minutes:.1f}min {status}\n", encoding="utf-8")
+    return {"wp": wp_id, "tag": tag, "engine": h.get("engine"), "status": status, "exit": exit_code,
+            "minutes": round(minutes, 1), "marker": str(rp["done"]), "log": str(rp["log"])}
 
 
 def read_done(project_root: str | os.PathLike, wp_id: str, tag: str = "", reports_dir: str | None = None) -> dict | None:

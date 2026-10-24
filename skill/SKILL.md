@@ -17,9 +17,13 @@ JBR=/c/Users/a8878/dev/jev-build-router   # Mac: /Users/ad/code/jev-build-router
 cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 ```
 
-## Default engine chain (user rule 2026-10-02; local Qwen added 2026-10-10)
+## Default engine chain (user rule 2026-10-02; local Qwen added 2026-10-10; automated agy OFF 2026-10-24)
 
-agy is the base worker. Every implement/fix step prefers, in order:
+**User rule 2026-10-24: automated agy is off.** `agy_gemini_pro` / `agy_claude_opus` ship `available: false` and are
+not in build_dag's default chain (Antigravity terms: no wrapping agy in third-party agents on consumer plans).
+Use `agy_manual` for agy work (below). Do not re-enable them with `--available ...=yes` unless the user asks.
+The default chain is now codex_astra > ollama_qwen > lan_qwen > claude_subagent. The list below is the old
+order, kept for when the user explicitly opts back in:
 
 1. `agy_gemini_pro` (agy, `auto:gemini`: newest Gemini that `agy models` lists, e.g. gemini-4-argon-high on 2026-10-16)
 2. `agy_claude_opus` (agy, `auto:claude-opus`, e.g. claude-opus-5-5-high; shares ONE Claude quota bucket with any other agy Claude model, e.g. Sonnet)
@@ -32,7 +36,7 @@ agy is the base worker. Every implement/fix step prefers, in order:
 
 Router decisions may use Clef: set `JBR_DECISION_URL=http://127.0.0.1:8000/v1/systemone` and `route --model clef-flash-4bit` for a local server, with no key. Hosted Workers AI requires `CLOUDFLARE_AI_TOKEN` and a Workers AI endpoint in `JBR_DECISION_URL`; an arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. The default Jev endpoint alone reads `TYPESAFE_API_KEY`.
 
-An engine out of quota is skipped until its reset time, then preferred again automatically. Availability is live, not configured: `engines.json` has `priority` 1..5 and every engine `available: true`; the shared state file `~/.jbr/engine_state.json` (override `JBR_STATE`) records `exhausted_until` per quota bucket.
+An engine out of quota is skipped until its reset time, then preferred again automatically. Availability is live, not configured: `engines.json` has `priority` 1..5 and every engine `available: true` except the two automated agy engines; the shared state file `~/.jbr/engine_state.json` (override `JBR_STATE`) records `exhausted_until` per quota bucket.
 
 ```
 PYTHONPATH="$JBR" python -m jbr probe agy_gemini_pro   # AVAILABLE (exit 0) | EXHAUSTED <utc-until> (3) | UNAVAILABLE <reason> (4)
@@ -41,6 +45,19 @@ PYTHONPATH="$JBR" python -m jbr pick --exclude agy_gemini_pro,codex_astra
 ```
 
 `probe` never calls the engine while `exhausted_until` is in the future, caches AVAILABLE for 10 min, and otherwise runs one cheap live probe (`agy --model <m> --print-timeout 45s --print "Reply only READY."` / `codex exec --skip-git-repo-check -m <m> -s workspace-write "Reply only READY. Do not run tools."`, 120 s timeout). Quota signature -> EXHAUSTED until the parsed reset hint (`2h9m31s`, `try again at 3:51 AM`, `try again at Sep 25th, 2026 3:49 AM`; unparseable -> +30 min); any other failure -> UNAVAILABLE and skipped 15 min. A real `jbr run` that ends QUOTA writes the same state, so the next probe already knows.
+
+## Manual agy (`agy_manual`, 2026-10-24)
+
+Google's Antigravity FAQ does not support wrapping `agy` inside third-party coding agents on consumer plans
+(account suspension risk), and the automatic `agy_*` engines do exactly that. When the user wants agy without
+that risk, assign `WP=agy_manual`. Do NOT run agy for them: `jbr handoff <WP>` writes the packet and prints
+the line they paste into an agy session they start themselves; they run `jbr done <WP> [--notes-file ...]`
+when it finishes. Review with `review_level.js` ONLY when `done` recorded OK, then `compose-fix`. For
+CRASH/QUOTA there is no engine work: hand it off again (same round), or pass `engineStatus: {WP: 'quota'}`. A fix round is
+`handoff <WP> --tag fix<N> --extra-file <fix file>`, then `done <WP> --tag fix<N>`, then review with `logTag`.
+In `build_dag.js` a manual-pinned package returns `final: 'manual'` (with its `handoff` command) and its
+dependents return `'waiting'`: tell the user which packets to run, then stop. Do not poll, and do not
+spawn agy "to help".
 
 ## Who decides (user rule, 2026-10-10)
 
@@ -57,7 +74,7 @@ Decide from, in this order:
    confirmed defects, minutes, quota hits; ledger `~/.jbr/ledger.jsonl`). Prefer the engine with the
    lowest defects/fix rounds on packages of the same kind and size.
 3. **The rubric**:
-   - default chain order agy Gemini > agy Claude Opus > Codex > local Qwen > Claude subagent (spend agy/Codex/Qwen before Claude's quota);
+   - default chain order Codex > local Qwen > Claude subagent (spend Codex/Qwen before Claude's quota); agy only as `agy_manual`, which the user runs;
    - review diversity: the reviewers are Claude, so a non-Claude implementer gets its mistakes caught rather than shared;
      prefer Gemini or Codex for subtle state/billing/security code;
    - legal, privacy or user-facing wording: Claude subagent (and say why);
@@ -102,7 +119,7 @@ Every `ops/prompts/<WP>.md` (or the plan's `--prompts` dir) must have, before yo
             promptsDir: "<plan prompts dir>",         // absolute is fine (plans may live outside the repo)
             maxFixRounds: 2, testCmd: "python -m pytest -q" }
    ```
-   Routing values: a list is the package's chain; a string pins that engine first and falls back along `engineChain` after it; `"auto"` or no entry walks the whole `engineChain` (default `['agy_gemini_pro','agy_claude_opus','codex_astra','ollama_qwen','claude_subagent']`). For each external engine the low-effort runner agent first runs `jbr probe`; EXHAUSTED/UNAVAILABLE -> reported as `quota` without spawning and the step moves to the next engine. There is no run-wide skip list: every step probes again, so a recovered engine is used again later in the same run. Quota/crash runs are never reviewed and never consume a fix round; review/verify/fix stay Claude subagents. Without `jbr`, auto chains reduce to `claude_subagent`.
+   Routing values: a list is the package's chain; a string pins that engine first and falls back along `engineChain` after it; `"auto"` or no entry walks the whole `engineChain` (default `['codex_astra','ollama_qwen','lan_qwen','claude_subagent']`; a pin on `agy_manual` stops at the handoff). For each external engine the low-effort runner agent first runs `jbr probe`; EXHAUSTED/UNAVAILABLE -> reported as `quota` without spawning and the step moves to the next engine. There is no run-wide skip list: every step probes again, so a recovered engine is used again later in the same run. Quota/crash runs are never reviewed and never consume a fix round; review/verify/fix stay Claude subagents. Without `jbr`, auto chains reduce to `claude_subagent`.
 4. **Review an already-built level separately** (e.g. packages built outside the workflow): Workflow tool with `scriptPath = ...\workflows\review_level.js`, `args = { root, ids: ["WP01", "WP02"], reportsDir: <jbr paths .reports_dir> }`. Save the workflow output to a json file, then `PYTHONPATH="$JBR" python -m jbr compose-fix <output.json> <round>` writes `<reports_dir>/fix-<WP>-round<N>.md`; re-run on `$(python -m jbr pick)` with `PYTHONPATH="$JBR" python -m jbr spawn WP --engine <engine> --tag fix1 --extra-file <reports_dir>/fix-WP-round1.md`.
 5. **Record.** After every build, save the Workflow's returned list (the per-package `[{wp, engine, final, history, low_open, ...}]`) to a JSON file and run `PYTHONPATH="$JBR" python -m jbr [--packages ...] record <result.json> --build <name>`. It appends one ledger line per package (implementer = the engine whose run succeeded, fix rounds, confirmed defects, quota hits, minutes from the run markers). Packages finished outside the workflow and never reviewed are not recorded: they would skew the scorecard.
 6. **Monitor.** `PYTHONPATH="$JBR" python -m jbr status` (routing + `.done` markers), `PYTHONPATH="$JBR" python -m jbr wait WP05 WP06 --timeout-min 70` (exit 124 while a marker is still missing), `cat ~/.jbr/engine_state.json` (who is exhausted until when). Every `python -m jbr` call needs `PYTHONPATH="$JBR"` unless `pip install -e` was run.

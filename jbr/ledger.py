@@ -20,6 +20,7 @@ from typing import Any
 from jbr import paths, runner
 
 LAST_RESORT = "claude_subagent"
+PENDING_FINALS = {"manual", "waiting"}  # build_dag.js rows with no engine outcome (manual engines)
 
 
 def ledger_path() -> pathlib.Path:
@@ -55,11 +56,14 @@ def _minutes(project: pathlib.Path | None, wp: str, reports_dir: str | None) -> 
 def entries_from_build(results: list[dict], *, project: str | os.PathLike | None = None, build: str = "",
                        reports_dir: str | None = None, hints: dict[str, dict] | None = None,
                        now: datetime | None = None) -> list[dict]:
-    """One ledger entry per package of a build_dag.js result list."""
+    """One ledger entry per package of a build_dag.js result list. Rows that ended 'manual' (handed off
+    to the user) or 'waiting' (on such a package) have no engine outcome yet and are skipped."""
     root = pathlib.Path(project).resolve() if project else None
     ts = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = []
     for row in results:
+        if row.get("final") in PENDING_FINALS:
+            continue
         wp = row["wp"]
         hist = row.get("history", [])
         reviews = [h for h in hist if str(h.get("stage", "")).startswith("review")]
@@ -105,7 +109,7 @@ def load(path: pathlib.Path | None = None) -> list[dict]:
 def scorecard(entries: list[dict]) -> dict[str, dict[str, Any]]:
     """Per engine: packages, accepted, failed, mean fix rounds / confirmed defects / minutes, quota hits.
 
-    `failed` = any final other than accept (blocked, unresolved after the last round, manual)."""
+    `failed` = any final other than accept (blocked, unresolved after the last round)."""
     by: dict[str, list[dict]] = {}
     for e in entries:
         by.setdefault(e.get("engine", "unknown"), []).append(e)

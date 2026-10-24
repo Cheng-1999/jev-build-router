@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from jbr import cli, ledger, paths, router
-from tests.conftest import reports
+from tests.conftest import AGY_ON, reports
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 10, 10, 1, 0, tzinfo=timezone.utc)
@@ -72,7 +72,7 @@ def test_scorecard_aggregates_per_engine(project, tmp_path):
 
 
 def _engines():
-    return router.load_engines(REPO / "engines.json", {"ollama_qwen": False, "lan_qwen": False})
+    return router.load_engines(REPO / "engines.json", {**AGY_ON, "ollama_qwen": False, "lan_qwen": False})
 
 
 def test_assign_writes_routing_build_dag_can_read(tmp_path):
