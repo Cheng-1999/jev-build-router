@@ -128,6 +128,11 @@ PYTHONPATH="$JBR" python -m jbr handoff --pending --print    # or the checklist 
 PYTHONPATH="$JBR" python -m jbr done --from agy-session.txt   # status: done -> OK, anything else -> CRASH; block = notes
 ```
 
+`python -m jbr inbox` (no `--project`) lists every project's checklist that still has open items, with the
+line to paste and the `done --from` command. It only reads files under `~/.jbr/runs`. The `build-router`
+skill has each project's Claude session do the assigning and write the checklist, so all that's left for you
+is `jbr inbox` and starting agy.
+
 New packages get their packet. Packets already handed off are reused as they are, keeping their start time and
 fix instructions, and a package with an open fix round gets no new round-0 packet. Rerun `--pending` at any
 time: it lists only what is still open, and deletes the checklist once nothing is. Each entry gives the exact REPORT ID to use (`WP03-fix1` for a fix round). A bare `REPORT WP03`

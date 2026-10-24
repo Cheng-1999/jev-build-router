@@ -64,6 +64,19 @@ In `build_dag.js` a manual-pinned package returns `final: 'manual'` (with its `h
 dependents return `'waiting'`: tell the user which packets to run, then stop. Do not poll, and do not
 spawn agy "to help".
 
+**You do the agy bookkeeping; the user only starts agy (user rule, 2026-10-24).** In every project session:
+1. When you assign (step 2 below), give `agy_manual` the packages that suit it (rubric below). Do it without
+   being asked: agy work is free diversity the user wants used.
+2. Right after `assign`, if anything went to `agy_manual`: run `jbr --project . [--packages/--prompts ...]
+   handoff --pending` (add `--done <ids>` for already-built dependencies a Claude subagent built). Give the user
+   the one paste line and the NOT YET list. Then carry on building the rest with `build_dag.js`. Never wait for agy.
+3. The user sees every project's waiting checklist with `python -m jbr inbox`, and pastes each line into an agy
+   session they start in that project.
+4. When the user says agy finished (or a saved agy output file appears where they said it would): run
+   `done --from <file>`, review each OK package with `review_level.js` and the `logTag` that `done` prints,
+   then `compose-fix`. Hand fixes back with `handoff <WP> --tag fix<N> --extra-file <fix file>`, then
+   `handoff --pending` again, so the next agy session gets the fixes and anything newly unblocked.
+
 ## Who decides (user rule, 2026-10-10)
 
 **The commander assigns, not a decision model.** You wrote the specs, read the code and can see what
@@ -84,6 +97,12 @@ Decide from, in this order:
      prefer Gemini or Codex for subtle state/billing/security code;
    - legal, privacy or user-facing wording: Claude subagent (and say why);
    - small, fully specified, low-risk packages (a doc edit, a config line, one function with its tests): assign `ollama_qwen` outright; it is free;
+   - `agy_manual` (Gemini via agy, run by the user in batches): a well-specified, self-contained package of
+     medium size, where a non-Claude family helps review (it is what `agy_gemini_pro` used to get: ~6 min,
+     usually one fix round for spec-literal misses). Do NOT give it a package on the critical path that other
+     work needs today, since it waits for the user. Do not give it legal or user-facing wording, or anything a
+     Claude subagent must do in the host session (GPU/Blender, local apps). Prefer leaves and late packages of
+     the DAG, and keep a dependency chain together on agy so one session can do it in order;
    - keep packages that edit the same file on the same engine or in dependency order.
 4. **Optional second opinion**: `--second-opinion` asks the decision model at `JBR_DECISION_URL` and records
    its pick beside yours (never applied). Use the **local Clef 27B** (free):
@@ -113,7 +132,7 @@ Every `ops/prompts/<WP>.md` (or the plan's `--prompts` dir) must have, before yo
 ## Steps
 
 1. **Check the engines.** `PYTHONPATH="$JBR" python -m jbr probe <engine>` for each. Force one off for a call with `--available codex_astra=no`; do not edit `engines.json` for a one-off. agy engines use `auto:<family>` models (resolved per probe/run from `agy models`, cached 1 h; see README "agy model names"), so a retired agy id needs no edit. A probe failure "cannot resolve model" means agy lists nothing of that family (not logged in, or the family is gone): run `agy models`. A codex probe failure whose detail is a model list means codex renamed the model: fix `engines.json`.
-2. **Assign.** `PYTHONPATH="$JBR" python -m jbr --project . [--packages ...] assign WP01=agy_gemini_pro WP02=codex_astra --reason "WP02=billing path, non-Claude family for review" [--second-opinion]`. Probes live, refuses unknown/exhausted engines, writes `routing.json` in the runs dir (`model: "commander"`, per package `engine`, `reason`, `chain` = your pick then the other usable engines by priority, ending in `claude_subagent`; `second_opinion` when asked). **Show the user the table with your reasons before building.** (`jbr route` still exists: the decision model routes everything itself. Use it only when the user asks for it.)
+2. **Assign.** `PYTHONPATH="$JBR" python -m jbr --project . [--packages ...] assign WP01=agy_manual WP02=codex_astra --reason "WP02=billing path, non-Claude family for review" [--second-opinion]`. Anything on `agy_manual`: run `handoff --pending` next (see "Manual agy"). Probes live, refuses unknown/exhausted engines, writes `routing.json` in the runs dir (`model: "commander"`, per package `engine`, `reason`, `chain` = your pick then the other usable engines by priority, ending in `claude_subagent`; `second_opinion` when asked). **Show the user the table with your reasons before building.** (`jbr route` still exists: the decision model routes everything itself. Use it only when the user asks for it.)
 3. **Build with the DAG workflow.** Call the Claude Code Workflow tool with `scriptPath = C:\Users\a8878\dev\jev-build-router\workflows\build_dag.js` and
    ```
    args = { root: "<project root>", jbr: "/c/Users/a8878/dev/jev-build-router",

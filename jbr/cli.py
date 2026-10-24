@@ -1,4 +1,4 @@
-"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done
+"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done|inbox
 
 Global options (before the subcommand):
   --project <root>          project root (default: cwd)
@@ -173,6 +173,8 @@ def _parser() -> argparse.ArgumentParser:
     dn.add_argument("--notes-file", default=None, help="file holding that report")
     dn.add_argument("--force", action="store_true", help="overwrite an outcome already recorded")
 
+    sub.add_parser("inbox", help="every project's agy checklist still waiting for you (handoff-pending.md), with its paste line")
+
     pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
     pk.add_argument("--exclude", default="", help="comma-separated engine keys to skip")
     pk.add_argument("--no-live", action="store_true", help="state file only; never call an engine")
@@ -323,7 +325,7 @@ def _hoist_globals(argv: list[str]) -> list[str]:
         return argv
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
                     {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths", "queue",
-                     "prereview", "handoff", "done"}), None)
+                     "prereview", "handoff", "done", "inbox"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
@@ -687,6 +689,23 @@ def _next_hint(recorded: list[dict]) -> None:
               "'crash' for them to review_level.js")
 
 
+def cmd_inbox(a) -> int:
+    rows = runner.inbox()
+    live = [r for r in rows if r["open"]]
+    if not live:
+        print("inbox empty: no project has an agy checklist waiting (a project session writes one with `jbr handoff --pending`)")
+        return 0
+    for n, r in enumerate(live, 1):
+        done = len(r["items"]) - len(r["open"])
+        print(f"{n}. {r['project']}: {len(r['open'])} open ({', '.join(r['open'])})" + (f", {done} already recorded" if done else ""))
+        print(f"   paste into an agy session you start in that project:\n   {r['pointer']}")
+        print(f"   afterwards: python -m jbr --project \"{r['project']}\" done --from <saved agy output>\n")
+    stale = len(rows) - len(live)
+    if stale:
+        print(f"({stale} finished checklist{'s' if stale != 1 else ''} not shown)")
+    return 0
+
+
 def cmd_paths(a) -> int:
     project = pathlib.Path(a.project).resolve()
     from jbr import ledger
@@ -715,7 +734,7 @@ def main(argv: list[str] | None = None) -> int:
     return {"route": cmd_route, "run": cmd_run, "spawn": cmd_spawn, "wait": cmd_wait,
             "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick,
             "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths, "queue": cmd_queue,
-            "prereview": cmd_prereview, "handoff": cmd_handoff, "done": cmd_done}[a.cmd](a)
+            "prereview": cmd_prereview, "handoff": cmd_handoff, "done": cmd_done, "inbox": cmd_inbox}[a.cmd](a)
 
 
 if __name__ == "__main__":

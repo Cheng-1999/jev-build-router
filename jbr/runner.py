@@ -576,9 +576,34 @@ def handoff_pending(project_root: str | os.PathLike, engines: dict[str, dict], p
                       f"######## END PACKET {lab} ########"]
     text = "\n".join(lines) + "\n"
     batch.write_text(text, encoding="utf-8")
-    pointer = (f"Your complete instructions are in the file {batch}. Read that file in full with your file-read tool "
-               f"before doing anything else, then carry out every instruction in it. Work only inside {root}.")
-    return {"items": items, "blocked": blocked, "path": str(batch), "pointer": pointer, "text": text}
+    return {"items": items, "blocked": blocked, "path": str(batch), "pointer": pointer_text(batch, root), "text": text}
+
+
+_ROOT_LINE_RE = re.compile(r"^Repository root: (.+?)\. Work only inside it\.$", re.MULTILINE)
+_ITEM_LINE_RE = re.compile(r"^\d+\. (\S+?): ", re.MULTILINE)
+
+
+def inbox(runs_root: pathlib.Path | None = None) -> list[dict]:
+    """Every project's agy checklist (handoff-pending.md) across the runs dir, for the user's one look at what
+    is waiting for them. Per checklist: {"project", "checklist", "items", "open", "pointer"}; `open` = the
+    REPORT ids with no .done marker yet (a checklist whose items are all recorded is stale: open == []).
+    Reads files only."""
+    root = runs_root or paths.runs_root()
+    out = []
+    for f in sorted(root.glob(f"*/reports/{PENDING_FILE}")) if root.exists() else []:
+        try:
+            text = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = _ROOT_LINE_RE.search(text)
+        if not m:
+            continue
+        project = pathlib.Path(m.group(1))
+        labels = _ITEM_LINE_RE.findall(text.split("NOT YET")[0])
+        still = [lab for lab in labels if not (f.parent / f"{RUN_PREFIX}-{lab}.done").exists()]
+        out.append({"project": str(project), "checklist": str(f), "items": labels, "open": still,
+                    "pointer": pointer_text(f, project)})
+    return out
 
 
 def resolve_report(project_root: str | os.PathLike, label: str, known_ids: list[str],
