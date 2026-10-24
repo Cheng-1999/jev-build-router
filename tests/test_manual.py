@@ -242,7 +242,9 @@ def test_build_dag_default_chain_has_no_automated_agy():
 
 
 def test_shipped_engines_keep_automated_agy_off(all_engines):
-    assert not all_engines["agy_gemini_pro"]["available"] and not all_engines["agy_claude_opus"]["available"]
+    automated_agy = [k for k, e in all_engines.items() if e.get("runner") == "agy"]
+    assert {"agy_gemini_pro", "agy_claude_opus", "agy_gemini_flash"} <= set(automated_agy)
+    assert not any(all_engines[k]["available"] for k in automated_agy)  # every automated agy engine ships off
     assert state.probe("agy_gemini_pro", all_engines).line() == "UNAVAILABLE disabled (available=false / --available no)"
     assert not any(k.startswith("agy") for k in router.usable_engines(all_engines))
 

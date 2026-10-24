@@ -78,5 +78,14 @@
     "available": true,
     "assign_only": true,
     "priority": 4
+  },
+  "agy_gemini_flash": {
+    "description": "OFF BY DEFAULT since 2026-10-24: Google's Antigravity FAQ does not support wrapping agy inside third-party coding agents on consumer plans (account suspension risk); use agy_manual instead, or re-enable per call with --available agy_gemini_flash=yes and an explicit build_dag engineChain at your own risk. agy CLI on Gemini Flash (\"auto:gemini-3.8-flash\" pinned family; separate quota bucket from Argon, observed 2026-10-19: Argon exhausted 145h while Flash answered). Use for small/medium, fully specified code packages and text drafting; not for Blender/GPU work unless the host session can run them. Unproven track record: review strictly.",
+    "runner": "agy",
+    "model": "gemini-3.8-flash-high",
+    "effort": "high",
+    "parallel_limit": 3,
+    "available": false,
+    "priority": 3
   }
 }
