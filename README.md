@@ -50,19 +50,19 @@ endpoint, set `CLOUDFLARE_AI_TOKEN`, and pass the matching `--model`. An
 arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. A Jev key
 is sent only to the default Jev URL.
 
-## Engine chain (default since 2026-10-02; automated agy off since 2026-10-24)
+## Engine chain (default since 2026-10-02; automated agy back on since 2026-11-06)
 
-Each implement/fix step prefers, in order (`priority` in `engines.json`). **The two automated agy engines ship
-`available: false` and are not in `build_dag.js`'s default `engineChain`** (see "Manual agy" below for why and
-for `agy_manual`). To opt back in at your own risk: `--available agy_gemini_pro=yes --available agy_claude_opus=yes`
-on the jbr CLI, and list them in `args.engineChain`.
+Each implement/fix step prefers, in order (`priority` in `engines.json`). **The automated agy engines were off
+from 2026-10-24 and are back on by the owner's decision (2026-11-06), with the account suspension risk accepted**
+(see "Manual agy" below for the risk and for `agy_manual`). To leave them out: `--available agy_gemini_pro=no
+--available agy_claude_opus=no --available agy_gemini_flash=no` on the jbr CLI, and an `args.engineChain` without them.
 
 | priority | engine | CLI |
 |---|---|---|
-| 1 | `agy_gemini_pro` | **off by default.** agy, `auto:gemini` (newest Gemini `agy models` lists; 2026-10-16: gemini-4-argon-high) |
-| 2 | `agy_claude_opus` | **off by default.** agy, `auto:claude-opus` (newest Claude Opus; 2026-10-16: claude-opus-5-5-high) |
-| 3 | `agy_gemini_flash` | **off by default.** agy, `gemini-3.8-flash-high` (pinned); separate quota bucket from Argon (2026-10-19: Argon exhausted 145 h while Flash answered); unproven, review strictly |
+| 1 | `agy_gemini_pro` | agy, `auto:gemini` (newest Gemini `agy models` lists; 2026-10-16: gemini-4-argon-high) |
+| 2 | `agy_claude_opus` | agy, `auto:claude-opus` (newest Claude Opus; 2026-10-16: claude-opus-5-5-high) |
 | 3 | `codex_astra` | codex, gpt-6-astra (`-s workspace-write`) |
+| 3 | `agy_gemini_flash` | agy, `gemini-3.8-flash-high` (pinned); separate quota bucket from Argon (2026-10-19: Argon exhausted 145 h while Flash answered); unproven, review strictly |
 | 4 | `ollama_qwen` | local Qwen 3.8 27B on Ollama via codex `--oss` (Mac only; free, slow; runners wait ~140 min) |
 | 4 | `lan_qwen` | Qwen on a LAN OpenAI-compatible server, codex with `CODEX_HOME=~/.codex-local` (free; needs `LOCAL_LLM_KEY`; runners wait ~140 min) |
 | 5 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
@@ -100,7 +100,8 @@ Global options go before the subcommand: `--project <root>` (default cwd), `--pa
 Google's Antigravity FAQ (checked 2026-10-24) says using third-party software to access Antigravity violates
 its terms and can get an account suspended. It also says `agy -p` headless mode is for "direct scripting and CI
 workflows", and that wrapping `agy` inside third-party coding agents is not supported on consumer plans. Driving
-`agy_gemini_pro` / `agy_claude_opus` from `build_dag.js` (Claude Code -> `jbr spawn` -> `agy -p`) is that pattern.
+the `agy_*` engines from `build_dag.js` (Claude Code -> `jbr spawn` -> `agy -p`) is that pattern, and the owner
+accepted that risk on 2026-11-06.
 `agy_manual` keeps agy in the build without wrapping it. **You** start agy and paste the packet. jbr only writes
 files and records what you tell it. Review stays in Claude Code.
 
@@ -170,8 +171,8 @@ packages show the time spent on earlier ones as well.
   prior `handoff` is refused, and so is a second `done` (`--force` overwrites). `--minutes` defaults to the time
   since `handoff`. `run` / `spawn` delete a stale `.handoff`, so a package re-assigned to an automatic engine
   cannot be marked done by hand.
-- `agy_gemini_pro` / `agy_claude_opus` ship `available: false` and are out of the default `engineChain`, so no
-  automatic build calls agy unless you opt in explicitly (see Engine chain).
+- The automated `agy_*` engines are in the default `engineChain` again (see Engine chain), so automatic builds do
+  call agy. `agy_manual` is the option for a package you want run by hand.
 
 ## Commander routing and the engine ledger (default since 2026-10-10)
 
@@ -295,7 +296,7 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | `runner` | `agy` \| `codex` \| `muse` \| `claude_subagent` \| `manual`. Only the first three are executed by `jbr run`; `claude_subagent` packages are implemented by workflow subagents inside `build_dag.js`; `manual` engines are run by the user (`jbr handoff` / `jbr done`, see Manual agy). |
 | `model`, `effort` | Passed to the CLI (`--model`/`-m`, `--effort`/`model_reasoning_effort`). |
 | `parallel_limit` | Informational for Jev (and you); not enforced by `spawn`. |
-| `available` | Static on/off switch: `true` for every shipped engine except `agy_gemini_pro` / `agy_claude_opus` (off since 2026-10-24); live probes decide the rest. Override per call with `--available k=yes|no` (a `no` engine probes `UNAVAILABLE disabled`). A single usable engine short-circuits routing without an API call. |
+| `available` | Static on/off switch: `true` for every shipped engine; live probes decide the rest. Override per call with `--available k=yes|no` (a `no` engine probes `UNAVAILABLE disabled`). A single usable engine short-circuits routing without an API call. |
 | `priority` | Chain order, 1 = most preferred. `jbr pick`, `route` (Jev's policy and the fallback chains) and the default `engineChain` follow it. Ties keep engines.json order. |
 | `env` | Optional `{VAR: value}` (`~` expanded) set for the engine's run and its probe, e.g. `lan_qwen`'s `CODEX_HOME`. |
 | `windows_sandbox` | Optional codex sandbox used instead of `workspace-write` on Windows only (`danger-full-access` where the sandboxed shell fails with `CryptUnprotectData failed`). |
@@ -379,7 +380,7 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
   routing: { WP04: ["agy_claude_opus", "codex_astra", "claude_subagent"],   // routing.json .chains (list)
              WP05: "codex_astra",                  // string: pin, then the engineChain entries after it
              WP06: "auto" },                       // or omit the package: walk the whole engineChain (DEFAULT)
-  engineChain: ["codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"],  // the default (no agy since 2026-10-24)
+  engineChain: ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "agy_gemini_flash", "ollama_qwen", "lan_qwen", "claude_subagent"],  // the default
   engineArgs: { agy_gemini_pro: "--timeout 55m" },   // optional extra `jbr spawn` args per engine
   jbrArgs: "--engines /c/path/engines.json",          // optional global jbr options for probe + spawn
   fallbackEngine: "claude_subagent",     // optional; appended to every chain as the last resort

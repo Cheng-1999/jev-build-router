@@ -232,21 +232,23 @@ def test_cli_done_missing_notes_file_exits_cleanly(project, capsys):
 
 
 @needs_node
-def test_build_dag_default_chain_has_no_automated_agy():
+def test_build_dag_default_chain_puts_automated_agy_first():
     args = {"root": "/p", "jbr": "/jbr", "reportsDir": "/r", "packages": [{"id": "WP01", "depends_on": []}]}
     ok = {"wp": "WP01", "pytest_summary": "1 passed", "files_created_or_changed": [], "unsatisfied": [], "notes": "", "engine_status": "ok"}
-    rc, out = run_workflow(BUILD_DAG, args, {"runs": {"impl:WP01:codex_astra": ok}})
+    rc, out = run_workflow(BUILD_DAG, args, {"runs": {"impl:WP01:agy_gemini_pro": ok}})
     assert rc == 0, out
-    assert out["result"][0]["chain"] == ["codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"]
-    assert not any("agy" in c for c in out["calls"])
+    assert out["result"][0]["chain"] == ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "agy_gemini_flash",
+                                         "ollama_qwen", "lan_qwen", "claude_subagent"]
+    assert not any("agy_manual" in c for c in out["calls"])
 
 
-def test_shipped_engines_keep_automated_agy_off(all_engines):
+def test_shipped_engines_have_automated_agy_on_and_it_can_be_switched_off(all_engines):
     automated_agy = [k for k, e in all_engines.items() if e.get("runner") == "agy"]
     assert {"agy_gemini_pro", "agy_claude_opus", "agy_gemini_flash"} <= set(automated_agy)
-    assert not any(all_engines[k]["available"] for k in automated_agy)  # every automated agy engine ships off
-    assert state.probe("agy_gemini_pro", all_engines).line() == "UNAVAILABLE disabled (available=false / --available no)"
-    assert not any(k.startswith("agy") for k in router.usable_engines(all_engines))
+    assert all(all_engines[k]["available"] for k in automated_agy)  # back on since 2026-11-06, user's decision
+    off = router.load_engines(REPO / "engines.json", {k: False for k in automated_agy})  # --available <engine>=no
+    assert state.probe("agy_gemini_pro", off).line() == "UNAVAILABLE disabled (available=false / --available no)"
+    assert not any(k in router.usable_engines(off) for k in automated_agy)
 
 
 # ----------------------------------------------------------------------------- handoff --pending / done --from

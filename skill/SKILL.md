@@ -17,17 +17,16 @@ JBR=/c/Users/a8878/dev/jev-build-router   # Mac: /Users/ad/code/jev-build-router
 cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 ```
 
-## Default engine chain (user rule 2026-10-02; local Qwen added 2026-10-10; automated agy OFF 2026-10-24)
+## Default engine chain (user rule 2026-10-02; local Qwen added 2026-10-10; automated agy back ON 2026-11-06)
 
-**User rule 2026-10-24: automated agy is off.** `agy_gemini_pro` / `agy_claude_opus` ship `available: false` and are
-not in build_dag's default chain (Antigravity terms: no wrapping agy in third-party agents on consumer plans).
-Use `agy_manual` for agy work (below). Do not re-enable them with `--available ...=yes` unless the user asks.
-The default chain is now codex_astra > ollama_qwen > lan_qwen > claude_subagent. The list below is the old
-order, kept for when the user explicitly opts back in:
+**User rule 2026-11-06: automated agy is back on** (off 2026-10-24 to 2026-11-06). Google's Antigravity terms do not
+support wrapping agy in third-party agents on consumer plans and warn of account suspension; the user knows and
+accepted that risk. If agy reports a suspension or a terms warning, stop using agy and tell the user. The default chain:
 
 1. `agy_gemini_pro` (agy, `auto:gemini`: newest Gemini that `agy models` lists, e.g. gemini-4-argon-high on 2026-10-16)
 2. `agy_claude_opus` (agy, `auto:claude-opus`, e.g. claude-opus-5-5-high; shares ONE Claude quota bucket with any other agy Claude model, e.g. Sonnet)
 3. `codex_astra` (codex, gpt-6-astra; flags `-s workspace-write`, there is no `--full-auto`)
+3. `agy_gemini_flash` (agy, gemini-3.8-flash-high, its own quota bucket; same priority as `codex_astra`, after it; unproven, review strictly)
 4. `ollama_qwen` (local Qwen 3.8 27B on Ollama, driven by codex `--oss --local-provider ollama`; free, never quota-limited)
 4. `lan_qwen` (Qwen on a LAN OpenAI-compatible server, codex with `CODEX_HOME=~/.codex-local`; free, never quota-limited, 2-bit/32K so small packages only; same priority as `ollama_qwen`, after it)
 5. `claude_subagent` (Claude Code workflow subagent; last resort, never quota-probed)
@@ -36,7 +35,7 @@ order, kept for when the user explicitly opts back in:
 
 Router decisions may use Clef: set `JBR_DECISION_URL=http://127.0.0.1:8000/v1/systemone` and `route --model clef-flash-4bit` for a local server, with no key. Hosted Workers AI requires `CLOUDFLARE_AI_TOKEN` and a Workers AI endpoint in `JBR_DECISION_URL`; an arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. The default Jev endpoint alone reads `TYPESAFE_API_KEY`.
 
-An engine out of quota is skipped until its reset time, then preferred again automatically. Availability is live, not configured: `engines.json` has `priority` 1..5 and every engine `available: true` except the two automated agy engines; the shared state file `~/.jbr/engine_state.json` (override `JBR_STATE`) records `exhausted_until` per quota bucket.
+An engine out of quota is skipped until its reset time, then preferred again automatically. Availability is live, not configured: `engines.json` has `priority` 1..5 and every engine `available: true`; the shared state file `~/.jbr/engine_state.json` (override `JBR_STATE`) records `exhausted_until` per quota bucket.
 
 ```
 PYTHONPATH="$JBR" python -m jbr probe agy_gemini_pro   # AVAILABLE (exit 0) | EXHAUSTED <utc-until> (3) | UNAVAILABLE <reason> (4)
@@ -49,8 +48,8 @@ PYTHONPATH="$JBR" python -m jbr pick --exclude agy_gemini_pro,codex_astra
 ## Manual agy (`agy_manual`, 2026-10-24)
 
 Google's Antigravity FAQ does not support wrapping `agy` inside third-party coding agents on consumer plans
-(account suspension risk), and the automatic `agy_*` engines do exactly that. When the user wants agy without
-that risk, assign `WP=agy_manual`. Do NOT run agy for them: `jbr handoff <WP>` writes the packet and prints
+(account suspension risk), and the automatic `agy_*` engines do exactly that (risk accepted, see above). When the user wants agy without
+that risk, or a package run by hand, assign `WP=agy_manual`. Do NOT run agy for them: `jbr handoff <WP>` writes the packet and prints
 the line they paste into an agy session they start themselves; they run `jbr done <WP> [--notes-file ...]`
 when it finishes. Review with `review_level.js` ONLY when `done` recorded OK, then `compose-fix`. For
 CRASH/QUOTA there is no engine work: hand it off again (same round), or pass `engineStatus: {WP: 'quota'}`. A fix round is
@@ -64,9 +63,8 @@ In `build_dag.js` a manual-pinned package returns `final: 'manual'` (with its `h
 dependents return `'waiting'`: tell the user which packets to run, then stop. Do not poll, and do not
 spawn agy "to help".
 
-**You do the agy bookkeeping; the user only starts agy (user rule, 2026-10-24).** In every project session:
-1. When you assign (step 2 below), give `agy_manual` the packages that suit it (rubric below). Do it without
-   being asked: agy work is free diversity the user wants used.
+**You do the agy bookkeeping; the user only starts agy (user rule, 2026-10-24).** When anything is on `agy_manual`:
+1. Since 2026-11-06 the automated engines carry agy work, so assign `agy_manual` only when the user asks for it.
 2. Right after `assign`, if anything went to `agy_manual`: run `jbr --project . [--packages/--prompts ...]
    handoff --pending`. Dependencies must be ACCEPTED, not just built: a ledger accept (`jbr record`), an accepting
    `review-<WP>-round<N>.json` (`compose-fix`), or `--done <ids>` (space or comma separated) for packages accepted
@@ -94,7 +92,7 @@ Decide from, in this order:
    confirmed defects, minutes, quota hits; ledger `~/.jbr/ledger.jsonl`). Prefer the engine with the
    lowest defects/fix rounds on packages of the same kind and size.
 3. **The rubric**:
-   - default chain order Codex > local Qwen > Claude subagent (spend Codex/Qwen before Claude's quota); agy only as `agy_manual`, which the user runs;
+   - default chain order agy > Codex > local Qwen > Claude subagent (spend these before Claude's quota);
    - review diversity: the reviewers are Claude, so a non-Claude implementer gets its mistakes caught rather than shared;
      prefer Gemini or Codex for subtle state/billing/security code;
    - legal, privacy or user-facing wording: Claude subagent (and say why);
@@ -103,9 +101,9 @@ Decide from, in this order:
      this project, since the contributor tier lets Meta train on the package's code; never for private repos.
      It needs billing at dev.meta.ai (a probe that says `Billing verification failed` means not set up).
      Quality is unproven, so record its builds (`jbr record`) to build a scorecard before relying on it;
-   - `agy_manual` (Gemini via agy, run by the user in batches): a well-specified, self-contained package of
-     medium size, where a non-Claude family helps review (it is what `agy_gemini_pro` used to get: ~6 min,
-     usually one fix round for spec-literal misses). Do NOT give it a package on the critical path that other
+   - `agy_gemini_pro`: a well-specified, self-contained package of medium size, where a non-Claude family helps
+     review (~6 min, usually one fix round for spec-literal misses);
+   - `agy_manual` (only when the user asks; Gemini via agy, run by the user in batches): the same kind of package. Do NOT give it a package on the critical path that other
      work needs today, since it waits for the user. Do not give it legal or user-facing wording, or anything a
      Claude subagent must do in the host session (GPU/Blender, local apps). Prefer leaves and late packages of
      the DAG, and keep a dependency chain together on agy so one session can do it in order;

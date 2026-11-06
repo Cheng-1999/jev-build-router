@@ -259,9 +259,10 @@ def test_shipped_ollama_engine_sits_before_claude_in_the_chain():
     assert "ollama_qwen" in router.available_engines(engines)   # on by default; its live probe decides
     automatic = [k for k in router.by_priority(engines) if not router.is_explicit_only(engines[k])]  # agy_manual, muse_spark: never chained
     assert automatic[-3:] == ["ollama_qwen", "lan_qwen", "claude_subagent"]
-    # automated agy ships off (2026-10-24, Antigravity terms): never in a shipped chain
-    assert router.chain_for("codex_astra", engines) == ["codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"]
-    assert not engines["agy_gemini_pro"]["available"] and not engines["agy_claude_opus"]["available"]
+    # automated agy back on since 2026-11-06 (user's decision): first in a shipped chain
+    assert router.chain_for("codex_astra", engines) == ["codex_astra", "agy_gemini_pro", "agy_claude_opus", "agy_gemini_flash",
+                                                        "ollama_qwen", "lan_qwen", "claude_subagent"]
+    assert engines["agy_gemini_pro"]["available"] and engines["agy_claude_opus"]["available"]
 
 
 def test_run_resolves_auto_models_offline_on_dry_run_and_logs_spec(project, engines, monkeypatch, tmp_path):

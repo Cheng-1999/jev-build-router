@@ -41,8 +41,8 @@ DEFAULT_GOAL = (
     "reviewed by fresh Claude reviewers with adversarial refutation and up to 2 fix rounds regardless of engine."
 )
 CHAIN_POLICY = (
-    "Engine chain: engines are ranked by `priority` (1 = most preferred; the user's default order is Codex, "
-    "local Qwen, Claude subagent as last resort; automated agy is off by default). Prefer the highest-priority engine that is available "
+    "Engine chain: engines are ranked by `priority` (1 = most preferred; the user's default order is agy, Codex, "
+    "local Qwen, Claude subagent as last resort). Prefer the highest-priority engine that is available "
     "now, unless this package's routing hints (numerical difficulty, state consistency / sign-convention "
     "criticality, size) clearly favour another available engine. Never choose an engine whose live_status is "
     "EXHAUSTED or UNAVAILABLE: it is out of quota or broken right now and is not offered as an answer."
