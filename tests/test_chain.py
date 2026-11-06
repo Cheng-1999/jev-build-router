@@ -226,11 +226,11 @@ def test_cli_pick_prints_first_available(all_engines, monkeypatch, capsys):
     assert cli.main(AGY_FLAGS + ["pick"]) == 0
     out, err = capsys.readouterr()
     assert out.strip() == "agy_claude_opus" and "agy_gemini_pro: EXHAUSTED" in err
-    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra"]) == 0
+    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,agy_gemini_flash"]) == 0
     assert capsys.readouterr().out.strip() == "ollama_qwen"        # local Qwen before Claude's quota
-    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,ollama_qwen"]) == 0
+    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,agy_gemini_flash,ollama_qwen"]) == 0
     assert capsys.readouterr().out.strip() == "lan_qwen"           # LAN Qwen next, still before Claude
-    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,ollama_qwen,lan_qwen"]) == 0
+    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,agy_gemini_flash,ollama_qwen,lan_qwen"]) == 0
     assert capsys.readouterr().out.strip() == "claude_subagent"
 
 
@@ -336,29 +336,28 @@ def test_route_passes_priority_and_live_status_and_writes_chains(project, packag
     doc = router.route(project, packages, all_engines, done={"WP01"}, api_key="k", availability=avail)
     body = captured["body"]
     for q in body["questions"].values():
-        assert set(q["criteria"]) == {"agy_claude_opus", "codex_astra", "claude_subagent"}  # exhausted engine never offered
+        assert set(q["criteria"]) == {"agy_claude_opus", "codex_astra", "agy_gemini_flash", "claude_subagent"}  # exhausted engine never offered
         assert "routing_policy" in q["instructions"]
     st = body["state"]
     assert st["routing_policy"] == router.CHAIN_POLICY
     assert st["engine_chain"] == [{"engine": "agy_gemini_pro", "priority": 1, "live_status": "EXHAUSTED"},
                                   {"engine": "agy_claude_opus", "priority": 2, "live_status": "AVAILABLE"},
                                   {"engine": "codex_astra", "priority": 3, "live_status": "AVAILABLE"},
-                                  # agy Flash ships off (automated agy, 2026-10-24): listed for context, never offered
-                                  {"engine": "agy_gemini_flash", "priority": 3, "live_status": "UNAVAILABLE"},
+                                  {"engine": "agy_gemini_flash", "priority": 3, "live_status": "UNKNOWN"},
                                   # local Qwen switched off by the fixture: listed for context, never offered
                                   {"engine": "ollama_qwen", "priority": 4, "live_status": "UNAVAILABLE"},
                                   {"engine": "lan_qwen", "priority": 4, "live_status": "UNAVAILABLE"},
                                   {"engine": "claude_subagent", "priority": 5, "live_status": "AVAILABLE"}]
     assert "live_status: EXHAUSTED until 2026-10-02T03:09:31Z" in st["engines"]["agy_gemini_pro"]
     assert "chain priority 1" in st["engines"]["agy_gemini_pro"]
-    assert doc["routing"]["WP02"]["chain"] == ["agy_claude_opus", "codex_astra", "claude_subagent"]
-    assert doc["routing"]["WP03"]["chain"] == ["codex_astra", "agy_claude_opus", "claude_subagent"]
+    assert doc["routing"]["WP02"]["chain"] == ["agy_claude_opus", "codex_astra", "agy_gemini_flash", "claude_subagent"]
+    assert doc["routing"]["WP03"]["chain"] == ["codex_astra", "agy_claude_opus", "agy_gemini_flash", "claude_subagent"]
     on_disk = json.loads(paths.routing_path(project).read_text(encoding="utf-8"))
-    assert on_disk["chains"] == {"WP02": ["agy_claude_opus", "codex_astra", "claude_subagent"],
-                                 "WP03": ["codex_astra", "agy_claude_opus", "claude_subagent"]}
+    assert on_disk["chains"] == {"WP02": ["agy_claude_opus", "codex_astra", "agy_gemini_flash", "claude_subagent"],
+                                 "WP03": ["codex_astra", "agy_claude_opus", "agy_gemini_flash", "claude_subagent"]}
     assert router.load_chains(project)["WP03"][0] == "codex_astra"
     assert router.load_routing(project) == {"WP02": "agy_claude_opus", "WP03": "codex_astra"}
-    assert "chain: agy_claude_opus > codex_astra > claude_subagent" in router.format_routing(doc)
+    assert "chain: agy_claude_opus > codex_astra > agy_gemini_flash > claude_subagent" in router.format_routing(doc)
 
 
 def test_route_never_routes_to_an_unusable_engine_even_if_jev_says_so(project, packages, all_engines, monkeypatch):
@@ -368,12 +367,12 @@ def test_route_never_routes_to_an_unusable_engine_even_if_jev_says_so(project, p
     doc = router.route(project, packages, all_engines, api_key="k", availability=avail, write=False)
     for r in doc["routing"].values():
         assert r["engine"] == "agy_claude_opus" and "overridden" in r
-        assert r["chain"] == ["agy_claude_opus", "codex_astra", "claude_subagent"]
+        assert r["chain"] == ["agy_claude_opus", "codex_astra", "agy_gemini_flash", "claude_subagent"]
 
 
 def test_chain_for_claude_pick_is_just_claude(all_engines):
     assert router.chain_for("claude_subagent", all_engines) == ["claude_subagent"]
-    assert router.chain_for("codex_astra", all_engines) == ["codex_astra", "agy_gemini_pro", "agy_claude_opus", "claude_subagent"]
+    assert router.chain_for("codex_astra", all_engines) == ["codex_astra", "agy_gemini_pro", "agy_claude_opus", "agy_gemini_flash", "claude_subagent"]
 
 
 def test_route_all_external_out_goes_to_claude_without_api(project, packages, all_engines, monkeypatch):
@@ -387,7 +386,7 @@ def test_route_all_external_out_goes_to_claude_without_api(project, packages, al
 def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, capsys):
     """End to end through the CLI: live probes (mocked subprocess) feed Jev (mocked urlopen)."""
     replies = {"gemini-3.1-pro-high": (3, AGY_QUOTA_LOG), "claude-opus-5-5-high": (0, "READY"),
-               "gpt-6-astra": (0, "READY"), "qwen3.8:27b-mlx": (0, "READY."),
+               "gpt-6-astra": (0, "READY"), "gemini-3.8-flash-high": (0, "READY"), "qwen3.8:27b-mlx": (0, "READY."),
                "qwen3.8-flash-next-iq2_xs": (0, "READY")}
     probed = []
 
@@ -406,11 +405,11 @@ def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, ca
     monkeypatch.setenv("TYPESAFE_API_KEY", "k-test")
     assert cli.main(AGY_FLAGS + ["--project", str(project), "route"]) == 0
     out, err = capsys.readouterr()
-    assert sorted(probed) == ["claude-opus-5-5-high", "gemini-3.1-pro-high", "gpt-6-astra",
+    assert sorted(probed) == ["claude-opus-5-5-high", "gemini-3.1-pro-high", "gemini-3.8-flash-high", "gpt-6-astra",
                               "qwen3.8-flash-next-iq2_xs", "qwen3.8:27b-mlx"]
     assert "agy_gemini_pro: EXHAUSTED" in err
     assert "agy_gemini_pro" not in next(iter(captured["body"]["questions"].values()))["criteria"]
-    assert router.load_chains(project) == {wp: ["agy_claude_opus", "codex_astra", "ollama_qwen", "lan_qwen", "claude_subagent"]
+    assert router.load_chains(project) == {wp: ["agy_claude_opus", "codex_astra", "agy_gemini_flash", "ollama_qwen", "lan_qwen", "claude_subagent"]
                                            for wp in ("WP01", "WP02", "WP03")}
     doc = json.loads(paths.routing_path(project).read_text(encoding="utf-8"))
     assert doc["availability"]["agy_gemini_pro"]["status"] == "EXHAUSTED"

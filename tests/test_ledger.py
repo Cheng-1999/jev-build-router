@@ -81,7 +81,7 @@ def test_assign_writes_routing_build_dag_can_read(tmp_path):
     doc = router.assign(tmp_path, {"WP01": "codex_astra", "WP02": "claude_subagent"}, _engines(),
                         {"WP01": "different family from the Claude reviewers"}, availability=avail)
     assert doc["model"] == "commander"
-    assert doc["routing"]["WP01"]["chain"] == ["codex_astra", "agy_gemini_pro", "claude_subagent"]  # opus dead
+    assert doc["routing"]["WP01"]["chain"] == ["codex_astra", "agy_gemini_pro", "agy_gemini_flash", "claude_subagent"]  # opus dead
     assert doc["routing"]["WP01"]["reason"].startswith("different family")
     assert doc["routing"]["WP02"]["chain"] == ["claude_subagent"]
     assert router.load_chains(tmp_path)["WP01"][0] == "codex_astra"

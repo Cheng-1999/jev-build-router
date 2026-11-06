@@ -2,8 +2,9 @@
 // Implement (Claude subagent or external engine via jbr), fresh-context review, adversarial
 // refutation, fix loop, per package.
 //
-// Engine chain: every implement/fix step walks the package's chain (default codex_astra >
-// ollama_qwen > lan_qwen > claude_subagent; automated agy is off since 2026-10-24). Before spawning an external engine its runner
+// Engine chain: every implement/fix step walks the package's chain (default agy_gemini_pro >
+// agy_claude_opus > codex_astra > agy_gemini_flash > ollama_qwen > lan_qwen > claude_subagent;
+// automated agy back on since 2026-11-06, user accepted the Antigravity terms risk). Before spawning an external engine its runner
 // agent runs `python -m jbr probe <engine>` (shared state file ~/.jbr/engine_state.json + a cheap
 // live probe, AVAILABLE cached 10 min): EXHAUSTED/UNAVAILABLE -> engine_status 'quota' without
 // spawning, and the step moves to the next engine. There is NO run-wide skip list: every step
@@ -28,7 +29,7 @@
 //   routing: { WP04: 'claude_subagent',       // pin: that engine first, then the engineChain entries after it
 //              WP05: ['agy_gemini_pro', 'codex_astra', 'claude_subagent'],  // explicit chain (ops/routing.json .chains)
 //              WP06: 'auto' },                // or no entry at all (the DEFAULT): walk engineChain
-//   engineChain: ['codex_astra', 'ollama_qwen', 'lan_qwen', 'claude_subagent'],  // default priority order (no agy since 2026-10-24)
+//   engineChain: ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'agy_gemini_flash', 'ollama_qwen', 'lan_qwen', 'claude_subagent'],  // default priority order
 //   engineWaits: { ollama_qwen: 16 },          // 8.75-minute marker waits per engine before CRASH (default 8 = ~70 min; local/LAN Qwen 16)
 //   engineArgs: { agy_gemini_pro: '--timeout 55m' },   // extra `python -m jbr spawn` args per engine (optional)
 //   jbrArgs: '--engines /c/path/engines.json',          // global jbr options for probe + spawn (optional)
@@ -80,8 +81,8 @@ const ENGINE_ARGS = A.engineArgs || {}
 const JBR_ARGS = (A.jbrArgs ? ' ' + A.jbrArgs : '') + (REPORTS ? ` --reports "${REPORTS}"` : '')
 const RUN_PREFIX = 'run'
 const LAST_RESORT = 'claude_subagent'
-// automated agy is off by default (2026-10-24, Antigravity terms): list agy_* in args.engineChain to opt back in
-const DEFAULT_CHAIN = ['codex_astra', 'ollama_qwen', 'lan_qwen', LAST_RESORT]
+// automated agy back on since 2026-11-06 (user accepted the Antigravity terms risk): pass args.engineChain without agy_* to leave it out
+const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'agy_gemini_flash', 'ollama_qwen', 'lan_qwen', LAST_RESORT]
 const ENGINE_CHAIN = Array.isArray(A.engineChain) && A.engineChain.length ? A.engineChain : DEFAULT_CHAIN
 const ENGINE_WAITS = Object.assign({ ollama_qwen: 16, lan_qwen: 16 }, A.engineWaits || {})
 const FALLBACK = A.fallbackEngine || LAST_RESORT
