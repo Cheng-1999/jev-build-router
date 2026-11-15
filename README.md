@@ -50,6 +50,27 @@ endpoint, set `CLOUDFLARE_AI_TOKEN`, and pass the matching `--model`. An
 arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. A Jev key
 is sent only to the default Jev URL.
 
+## One task, no plan files (`jbr quick`, since 2026-11-16)
+
+For a single task that is too big to just do in the session but does not deserve a work-package plan:
+
+```bash
+PYTHONPATH="$JBR" python -m jbr --project . quick "Add a --version flag to the CLI" \
+    [--files src/cli.py,tests/test_cli.py] [--accept "prints the version"]... [--test-cmd "pytest -q"] \
+    [--engine codex_astra | --exclude agy_gemini_pro] [--task-file task.md] [--no-live] [--timeout 55m] [--dry-run]
+PYTHONPATH="$JBR" python -m jbr --project . quick --id Q1 --exclude agy_gemini_pro   # re-run plan Q1 on another engine
+```
+
+It writes a one-package plan (`Q1`, `Q2`, ... per project) to `~/.jbr/runs/<key>/quick/<id>/` (never into the
+project), takes the first available engine by priority (or `--engine`), spawns it, and prints the plan path, the
+engine and pid, then four commands: `wait`, the `review_level.js` args for an OK run, the fix round (`compose-fix`,
+`spawn --tag fix1`, `wait --tag fix1`, re-review with `logTag: "fix1"`), and a retry line
+(`quick --id <id> --exclude <engines tried>`) for QUOTA/CRASH. The printed commands keep this call's `--reports`,
+`--engines` and `--available`, and use POSIX shell syntax (Git Bash on Windows). `--dry-run` still writes the plan
+(and uses an id) but launches nothing and probes nothing live. When no external engine is available
+the plan is kept, nothing is spawned and it exits 3: do the task in the session. Manual and Claude-subagent
+engines are refused (exit 2). Review stays mandatory: an engine's OK is not acceptance.
+
 ## Engine chain (default since 2026-10-02; automated agy back on since 2026-11-06)
 
 Each implement/fix step prefers, in order (`priority` in `engines.json`). **The automated agy engines were off

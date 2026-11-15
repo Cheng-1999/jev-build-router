@@ -215,9 +215,12 @@ def test_done_twice_is_refused_unless_forced(project, all_engines):
         runner.mark_done(project, "WP01", minutes=-5, force=True)
 
 
-def test_automatic_run_supersedes_a_handoff(project, all_engines):
+def test_automatic_run_supersedes_a_handoff(project, all_engines, monkeypatch):
     runner.handoff(project, "WP01", "agy_manual", all_engines, _pk(project))
     runner.spawn(project, "WP01", ["--engine", "codex_astra"], dry_run=True)
+    assert runner.read_handoff(project, "WP01") is not None  # a dry run changes nothing
+    monkeypatch.setattr(runner, "launch_detached", lambda argv, cwd, out: 4242)
+    runner.spawn(project, "WP01", ["--engine", "codex_astra"])
     assert runner.read_handoff(project, "WP01") is None
     with pytest.raises(ValueError, match="no handoff"):
         runner.mark_done(project, "WP01")

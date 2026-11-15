@@ -1,6 +1,6 @@
 ---
 name: build-router
-description: "Use when a project has work packages to build (ops/work_packages.json + ops/prompts/WPxx.md) and they must be handed to engines (Claude Code subagent, agy on Gemini/Claude, Codex, local Qwen) and driven through fresh-context review, adversarial refutation and fix rounds. YOU (the main session) assign every package from the specs, the code and the engine scorecard; a decision model (local Clef / Jev) is only an optional second opinion. Wraps the jev-build-router repo: assign/record/scorecard, headless agy/codex driver, build_dag and review_level Workflow scripts."
+description: "Use for any sizable implementation task (a bug fix or feature over ~3+ files, a refactor, a batch of independent tasks: `jbr quick` hands one task to an engine with no plan files) and when a project has work packages to build (ops/work_packages.json + ops/prompts/WPxx.md) and they must be handed to engines (Claude Code subagent, agy on Gemini/Claude, Codex, local Qwen) and driven through fresh-context review, adversarial refutation and fix rounds. YOU (the main session) assign every package from the specs, the code and the engine scorecard; a decision model (local Clef / Jev) is only an optional second opinion. Wraps the jev-build-router repo: assign/record/scorecard, headless agy/codex driver, build_dag and review_level Workflow scripts."
 ---
 
 # /build-router
@@ -16,6 +16,16 @@ The Windows paths below are examples; substitute the current machine's.
 JBR=/c/Users/a8878/dev/jev-build-router   # Mac: /Users/ad/code/jev-build-router
 cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 ```
+
+## One task: `jbr quick` (2026-11-16)
+
+A single implementation task (a bug fix or feature over ~3+ files, or a refactor) needs no plan files:
+`PYTHONPATH="$JBR" python -m jbr --project . quick "<task, with enough detail to do it without asking>" [--files a,b]
+[--accept "..."] [--test-cmd "..."]`. Tell the user the engine it printed, keep working on something else, then run
+the printed `wait` line. OK: run `review_level.js` with the printed args (never skip the review), then `compose-fix`
+and the printed fix `spawn` if it found defects. QUOTA/CRASH: run the printed retry line. Exit 3 (no external
+engine): do the task yourself. Several independent tasks: one `quick` each, or write a plan and use `build_dag.js`.
+Keep in the session: small edits, legal/user-facing wording, and anything needing this session's tools (GPU/Blender, local apps).
 
 ## Default engine chain (user rule 2026-10-02; local Qwen added 2026-10-10; automated agy back ON 2026-11-06)
 
