@@ -356,15 +356,15 @@ def spawn(project_root: str | os.PathLike, wp_id: str, run_args: list[str], tag:
     """Launch `python -m jbr run <wp_id> <run_args...>` detached so it survives the caller's timeout."""
     root = pathlib.Path(project_root).resolve()
     paths = report_paths(root, wp_id, tag, reports_dir)
+    argv = [sys.executable, "-m", "jbr", "run", wp_id, "--project", str(root), *run_args]
+    if tag and "--tag" not in run_args:
+        argv += ["--tag", tag]
+    if dry_run:  # before any unlink: a dry run must not delete a finished run's marker
+        return {"pid": None, "argv": argv, "marker": str(paths["done"])}
     paths["dir"].mkdir(parents=True, exist_ok=True)
     if paths["done"].exists():
         paths["done"].unlink()
     paths["handoff"].unlink(missing_ok=True)  # `jbr done` must never fake this run's marker
-    argv = [sys.executable, "-m", "jbr", "run", wp_id, "--project", str(root), *run_args]
-    if tag and "--tag" not in run_args:
-        argv += ["--tag", tag]
-    if dry_run:
-        return {"pid": None, "argv": argv, "marker": str(paths["done"])}
     return {"pid": launch_detached(argv, root, paths["stdout"]), "argv": argv, "marker": str(paths["done"])}
 
 
@@ -382,6 +382,56 @@ def launch_detached(argv: list[str], cwd: pathlib.Path, stdout_path: pathlib.Pat
     out = open(stdout_path, "w", encoding="utf-8")
     p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env, **kw)
     return p.pid
+
+
+# ----------------------------------------------------------------------------- quick (one-package plans)
+
+QUICK_PREFIX = "Q"
+QUICK_ACCEPTANCE = ["The task in the spec is done as described, and nothing beyond it was changed.",
+                    "The project's existing tests still pass."]
+
+
+def quick_plan_paths(project_root: str | os.PathLike, qid: str) -> dict[str, pathlib.Path]:
+    d = paths.quick_dir(project_root) / qid
+    return {"dir": d, "packages": d / "work_packages.json", "prompts": d / "prompts", "spec": d / "prompts" / f"{qid}.md"}
+
+
+def write_quick_plan(project_root: str | os.PathLike, task: str, *, files: list[str] | None = None,
+                     acceptance: list[str] | None = None, test_cmd: str = "") -> tuple[str, dict[str, pathlib.Path]]:
+    """Write a one-package plan for `task` under paths.quick_dir (never inside the project); returns (id, paths).
+
+    Ids are Q1, Q2, ... per project. The id's directory is created with exist_ok=False, so two sessions
+    writing quick plans at the same time never get the same id.
+    """
+    task = task.strip()
+    if not task:
+        raise ValueError("empty task")
+    base = paths.quick_dir(project_root)
+    base.mkdir(parents=True, exist_ok=True)
+    taken = [int(p.name[len(QUICK_PREFIX):]) for p in base.iterdir()
+             if p.name.startswith(QUICK_PREFIX) and p.name[len(QUICK_PREFIX):].isdigit()]
+    n = max(taken, default=0) + 1
+    while True:
+        qid = f"{QUICK_PREFIX}{n}"
+        qp = quick_plan_paths(project_root, qid)
+        try:
+            qp["dir"].mkdir()
+            break
+        except FileExistsError:
+            n += 1
+    acceptance = acceptance or QUICK_ACCEPTANCE
+    title = task.splitlines()[0][:80]
+    wp = {"id": qid, "title": title, "depends_on": [],
+          "goal": "Do the task in the FULL PACKAGE SPEC below.",
+          "files": files or ["(no fixed list) change only the files this task needs"],
+          "acceptance": acceptance, "tests": [test_cmd] if test_cmd else ["the project's existing test suite"],
+          "spec_refs": [], "implementer_prompt": ""}
+    qp["prompts"].mkdir()
+    qp["packages"].write_text(json.dumps({"work_packages": [wp]}, indent=2) + "\n", encoding="utf-8")
+    spec = [f"# {qid}: {title}", "", "## Task", "", task, "", "## Acceptance", "", *[f"- {x}" for x in acceptance]]
+    spec += ["", "## Files", "", *([f"- {f}" for f in files] if files else ["(no fixed list) only the files this task needs"])]
+    qp["spec"].write_text("\n".join(spec) + "\n", encoding="utf-8")
+    return qid, qp
 
 
 # ----------------------------------------------------------------------------- manual engines

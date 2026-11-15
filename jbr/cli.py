@@ -1,4 +1,4 @@
-"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done|inbox
+"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done|inbox|quick
 
 Global options (before the subcommand):
   --project <root>          project root (default: cwd)
@@ -15,6 +15,10 @@ Pre-review: `prereview <WP>` runs alibaba/open-code-review on the package's chan
 local Ollama (jbr/prereview.py) and writes prereview-<WP>[-tag].json; it always exits 0 (the status is
 in the json and the .done marker), so a missing tool or a slow model never stops a build.
 
+Quick: `quick "<task>"` writes a one-package plan under ~/.jbr/runs/<key>/quick/<id>/ (never in the project),
+picks the first available external engine (or takes --engine), spawns it and prints the `wait` command, the
+review_level.js args and a retry line. No external engine available: the plan is kept and it exits 3.
+
 Manual engines (runner "manual", e.g. agy_manual): jbr never runs them. `handoff <WP>` writes the
 packet and prints the line to paste into the engine you run yourself; `done <WP>` records the outcome
 (.done marker), after which review_level.js reviews it like any other run.
@@ -24,6 +28,8 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
+import shlex
 import sys
 
 from jbr import paths, prereview, router, runner, state
@@ -176,6 +182,20 @@ def _parser() -> argparse.ArgumentParser:
 
     sub.add_parser("inbox", help="every project's agy checklist still waiting for you (handoff-pending.md), with its paste line")
 
+    qk = sub.add_parser("quick", help="one task, no plan files: write a one-package plan in ~/.jbr, pick an engine, spawn it")
+    qk.add_argument("task", nargs="?", default="", help="what to do (or --task-file); omit with --id to re-run that plan")
+    qk.add_argument("--task-file", default=None, help="file holding the task text")
+    qk.add_argument("--id", dest="qid", default=None, help="re-run an existing quick plan (e.g. Q3) instead of writing one")
+    qk.add_argument("--files", default="", help="comma-separated files the engine should change (default: whatever the task needs)")
+    qk.add_argument("--accept", action="append", default=[], metavar="TEXT", help="acceptance criterion (repeatable)")
+    qk.add_argument("--test-cmd", default="", help="test command for the engine and the review (default: the project's suite)")
+    qk.add_argument("--engine", default=None, help="skip the pick and use this engine")
+    qk.add_argument("--exclude", default="", help="comma-separated engines the pick skips (e.g. the one that just hit quota)")
+    qk.add_argument("--no-live", action="store_true", help="pick from the state file only; never probe an engine")
+    qk.add_argument("--timeout", default=runner.DEFAULT_TIMEOUT)
+    qk.add_argument("--dry-run", action="store_true",
+                    help="still WRITES the plan (a new id) and prints the argv; launches nothing and probes nothing live")
+
     pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
     pk.add_argument("--exclude", default="", help="comma-separated engine keys to skip")
     pk.add_argument("--no-live", action="store_true", help="state file only; never call an engine")
@@ -287,7 +307,9 @@ def cmd_spawn(a) -> int:
             return 2
         # the child runs with cwd=project: paths given relative to THIS cwd must be made absolute
         run_args = ["--engine", engine_key, "--engines", str(pathlib.Path(a.engines).resolve()),
-                    "--packages", a.packages, "--prompts", a.prompts, "--reports", a.reports, "--timeout", a.timeout]
+                    "--packages", a.packages, "--prompts", a.prompts, "--timeout", a.timeout]
+        if a.reports:  # None (the default) must not reach the child's argv
+            run_args += ["--reports", a.reports]
         for ov in a.available:
             run_args += ["--available", ov]
         if a.extra:
@@ -319,10 +341,96 @@ def cmd_pick(a) -> int:
     return 0
 
 
+SLOW_ENGINES = {"ollama_qwen": 140, "lan_qwen": 140}  # wait minutes; the rest finish within the default 70
+
+
+def cmd_quick(a) -> int:
+    project = pathlib.Path(a.project).resolve()
+    engines = _engines(a)
+    if a.task and a.task_file:
+        print("pass the task as an argument or with --task-file, not both", file=sys.stderr)
+        return 2
+    task = a.task or (pathlib.Path(a.task_file).read_text(encoding="utf-8") if a.task_file else "")
+    if a.qid:
+        if task:
+            print("pass a task or --id, not both", file=sys.stderr)
+            return 2
+        if not re.fullmatch(rf"{runner.QUICK_PREFIX}\d+", a.qid, re.IGNORECASE):
+            print(f"--id must look like {runner.QUICK_PREFIX}3, got {a.qid!r}", file=sys.stderr)
+            return 2
+        qid = a.qid.upper()
+        qp = runner.quick_plan_paths(project, qid)
+        if not qp["packages"].exists():
+            print(f"no quick plan {qid} at {qp['packages']}", file=sys.stderr)
+            return 2
+    elif not task.strip():
+        print("give the task as an argument or with --task-file", file=sys.stderr)
+        return 2
+    if a.engine:
+        if a.engine not in engines:
+            print(f"unknown engine {a.engine!r}; known: {sorted(engines)}", file=sys.stderr)
+            return 2
+        if engines[a.engine].get("runner") == "claude_subagent" or runner.is_manual(engines[a.engine]):
+            print(f"{a.engine} is not run by jbr; `quick` is for external engines", file=sys.stderr)
+            return 2
+        engine_key = a.engine
+        r = state.probe(engine_key, engines, live=False)
+        if not r.usable:
+            print(f"[jbr quick] warning: {engine_key}: {r.line()} (spawning anyway because --engine was given)", file=sys.stderr)
+    else:
+        exclude = {e.strip() for e in a.exclude.split(",") if e.strip()}
+        engine_key, seen = state.pick(engines, exclude, live=not (a.no_live or a.dry_run))
+        for r in seen:
+            if r.engine != engine_key:
+                print(f"[jbr quick] {r.engine}: {r.line()}", file=sys.stderr)
+    if not a.qid:
+        files = [f.strip() for f in a.files.split(",") if f.strip()]
+        qid, qp = runner.write_quick_plan(project, task, files=files, acceptance=a.accept, test_cmd=a.test_cmd)
+    # printed commands carry every global option this call had, so `wait`/`compose-fix`/`spawn` find the same files
+    globals_ = ["--project", str(project)]
+    if a.reports:
+        globals_ += ["--reports", a.reports]
+    if pathlib.Path(a.engines).resolve() != DEFAULT_ENGINES.resolve():
+        globals_ += ["--engines", str(pathlib.Path(a.engines).resolve())]
+    for ov in a.available:
+        globals_ += ["--available", ov]
+    jbr = (f"PYTHONPATH={shlex.quote(str(REPO_ROOT))} {shlex.quote(sys.executable)} -m jbr "
+           + " ".join(shlex.quote(g) for g in globals_))
+    plan_opts = f"--packages {shlex.quote(str(qp['packages']))} --prompts {shlex.quote(str(qp['prompts']))}"
+    print(f"{qid}: plan {qp['packages']}")
+    if engines.get(engine_key, {}).get("runner") == "claude_subagent":
+        print(f"{qid}: no external engine available; do the task in this session (spec: {qp['spec']})")
+        print(f"retry later: {jbr} quick --id {qid}")
+        return 3
+    run_args = ["--engine", engine_key, "--engines", str(pathlib.Path(a.engines).resolve()),
+                "--packages", str(qp["packages"]), "--prompts", str(qp["prompts"]), "--timeout", a.timeout]
+    if a.reports:
+        run_args += ["--reports", a.reports]
+    for ov in a.available:
+        run_args += ["--available", ov]
+    res = runner.spawn(project, qid, run_args, reports_dir=a.reports, dry_run=a.dry_run)
+    if a.dry_run:
+        print(f"{qid}: engine={engine_key} [dry-run] {json.dumps(res['argv'])}")
+    else:
+        print(f"{qid}: engine={engine_key} spawned pid={res['pid']} marker={res['marker']}")
+    review = {"root": str(project), "ids": [qid], "promptsDir": str(qp["prompts"]),
+              "reportsDir": str(paths.reports_dir(project, a.reports)), "jbr": str(REPO_ROOT), "jbrArgs": plan_opts}
+    if a.test_cmd:
+        review["testCmd"] = a.test_cmd
+    print(f"wait:   {jbr} wait {qid} --timeout-min {SLOW_ENGINES.get(engine_key, 70)}")
+    print(f"review (OK only): Workflow {REPO_ROOT / 'workflows' / 'review_level.js'} args={json.dumps(review)}")
+    print(f"fix:    {jbr} compose-fix <review output.json> 1, then "
+          f"{jbr} {plan_opts} spawn {qid} --engine {engine_key} --tag fix1 --extra-file <fix file>, then "
+          f"{jbr} wait {qid} --tag fix1 --timeout-min {SLOW_ENGINES.get(engine_key, 70)} and review again with logTag \"fix1\"")
+    excl = ",".join(sorted({e.strip() for e in a.exclude.split(",") if e.strip()} | {engine_key}))
+    print(f"retry (QUOTA/CRASH): {jbr} quick --id {qid} --exclude {excl}")
+    return 0
+
+
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
 # sub-options that take one value: the token after them is a VALUE, never a global option
 VALUE_OPTS = {"--from", "--status", "--exit", "--minutes", "--notes", "--notes-file", "--reason", "--build", "--base", "--test-cmd", "--max", "--test-timeout-min", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
-              "--model", "--timeout-min", "--poll", "--exclude", "--commit", "--url", "--backend-engine", "--effort", "--budget-min"}
+              "--model", "--timeout-min", "--poll", "--exclude", "--task-file", "--id", "--files", "--accept", "--commit", "--url", "--backend-engine", "--effort", "--budget-min"}
 
 
 def _hoist_globals(argv: list[str]) -> list[str]:
@@ -331,7 +439,7 @@ def _hoist_globals(argv: list[str]) -> list[str]:
         return argv
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
                     {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths", "queue",
-                     "prereview", "handoff", "done", "inbox"}), None)
+                     "prereview", "handoff", "done", "inbox", "quick"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
@@ -748,7 +856,8 @@ def main(argv: list[str] | None = None) -> int:
     return {"route": cmd_route, "run": cmd_run, "spawn": cmd_spawn, "wait": cmd_wait,
             "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick,
             "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths, "queue": cmd_queue,
-            "prereview": cmd_prereview, "handoff": cmd_handoff, "done": cmd_done, "inbox": cmd_inbox}[a.cmd](a)
+            "prereview": cmd_prereview, "handoff": cmd_handoff, "done": cmd_done, "inbox": cmd_inbox,
+            "quick": cmd_quick}[a.cmd](a)
 
 
 if __name__ == "__main__":

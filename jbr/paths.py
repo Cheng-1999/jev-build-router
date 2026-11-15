@@ -45,6 +45,11 @@ def routing_path(project_root: str | os.PathLike) -> pathlib.Path:
     return project_dir(project_root) / "routing.json"
 
 
+def quick_dir(project_root: str | os.PathLike) -> pathlib.Path:
+    """One-package plans written by `jbr quick` (<id>/work_packages.json + <id>/prompts/<id>.md)."""
+    return project_dir(project_root) / "quick"
+
+
 LEGACY_ROUTING = pathlib.Path("ops") / "routing.json"
 
 
