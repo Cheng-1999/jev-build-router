@@ -9,11 +9,11 @@
     "priority": 5
   },
   "agy_claude_opus": {
-    "description": "ON BY DEFAULT again since 2026-11-06 (user's decision): Google's Antigravity FAQ does not support wrapping agy inside third-party coding agents on consumer plans, and the user accepted that account suspension risk; turn off per call with --available <engine>=no, or use agy_manual. agy CLI on the newest Claude Opus that `agy models` lists (\"auto:claude-opus\", effort suffix in the id). Observed: ~11 min per package, ~2 confirmed defects, but quota exhausts after ~2 runs and stalls ~90 minutes. Same family as the Claude reviewers. Shares one Claude quota bucket with every other agy Claude engine (state file key agy_claude).",
+    "description": "ON BY DEFAULT again since 2026-11-06 (user's decision): Google's Antigravity FAQ does not support wrapping agy inside third-party coding agents on consumer plans, and the user accepted that account suspension risk; turn off per call with --available <engine>=no, or use agy_manual. agy CLI on the newest Claude Opus that `agy models` lists (\"auto:claude-opus\", effort suffix in the id). Observed: ~11 min per package, ~2 confirmed defects, but quota exhausts after ~2 runs and stalls ~90 minutes. parallel_limit 1 since 2026-11-17: both overlapping runs so far ended QUOTA. Same family as the Claude reviewers. Shares one Claude quota bucket with every other agy Claude engine (state file key agy_claude).",
     "runner": "agy",
     "model": "auto:claude-opus",
     "effort": "high",
-    "parallel_limit": 2,
+    "parallel_limit": 1,
     "available": true,
     "priority": 2
   },
@@ -94,11 +94,11 @@
     "priority": 4
   },
   "agy_gemini_flash": {
-    "description": "ON BY DEFAULT again since 2026-11-06 (user's decision): Google's Antigravity FAQ does not support wrapping agy inside third-party coding agents on consumer plans, and the user accepted that account suspension risk; turn off per call with --available <engine>=no, or use agy_manual. agy CLI on Gemini Flash (\"auto:gemini-3.8-flash\" pinned family; separate quota bucket from Argon, observed 2026-10-19: Argon exhausted 145h while Flash answered). Use for small/medium, fully specified code packages and text drafting; not for Blender/GPU work unless the host session can run them. Unproven track record: review strictly.",
+    "description": "ON BY DEFAULT again since 2026-11-06 (user's decision): Google's Antigravity FAQ does not support wrapping agy inside third-party coding agents on consumer plans, and the user accepted that account suspension risk; turn off per call with --available <engine>=no, or use agy_manual. agy CLI on Gemini Flash (\"auto:gemini-3.8-flash\" pinned family; separate quota bucket from Argon, observed 2026-10-19: Argon exhausted 145h while Flash answered). Use for small/medium, fully specified code packages and text drafting; not for Blender/GPU work unless the host session can run them. Unproven track record: review strictly. parallel_limit 5 since 2026-11-17: 5 concurrent runs on 2026-10-19 (separate worktrees) finished 13 of 14 OK.",
     "runner": "agy",
     "model": "gemini-3.8-flash-high",
     "effort": "high",
-    "parallel_limit": 3,
+    "parallel_limit": 5,
     "available": true,
     "priority": 3
   }

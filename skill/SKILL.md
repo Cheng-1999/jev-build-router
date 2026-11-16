@@ -135,6 +135,8 @@ Decide from, in this order:
      Claude subagent must do in the host session (GPU/Blender, local apps). Prefer leaves and late packages of
      the DAG, and keep a dependency chain together on agy so one session can do it in order;
    - keep packages that edit the same file on the same engine or in dependency order.
+   - `build_dag.js` runs at most `parallel_limit` packages per engine at once (Flash 5, Pro 3, Opus 1, local Qwen 1;
+     extra ones queue), so spreading packages over engines finishes sooner than pinning them all to one.
 4. **Optional second opinion**: `--second-opinion` asks the decision model at `JBR_DECISION_URL` and records
    its pick beside yours (never applied). Use the **local Clef 27B** (free):
    `cd ~/code/clef-local && .venv/bin/python models/clef-4bit/clef_mlx.py serve --port 8001` then
@@ -172,6 +174,7 @@ Every `ops/prompts/<WP>.md` (or the plan's `--prompts` dir) must have, before yo
             done: [...],                              // already accepted packages
             routing: <routing.json .chains>,          // `jbr paths` .routing; per package: [chain] | "engine" (pin) | "auto"
             promptsDir: "<plan prompts dir>",         // absolute is fine (plans may live outside the repo)
+            engineLimits: { agy_gemini_pro: 2 },      // optional; max runs per engine at once (default parallel_limit, 0 = unlimited)
             maxFixRounds: 2, testCmd: "python -m pytest -q" }
    ```
    Routing values: a list is the package's chain; a string pins that engine first and falls back along `engineChain` after it; `"auto"` or no entry walks the whole `engineChain` (default `['agy_gemini_pro','agy_claude_opus','codex_astra','agy_gemini_flash','ollama_qwen','lan_qwen','hermes_qwen','claude_subagent']`; a pin on `agy_manual` stops at the handoff). For each external engine the low-effort runner agent first runs `jbr probe`; EXHAUSTED/UNAVAILABLE -> reported as `quota` without spawning and the step moves to the next engine. There is no run-wide skip list: every step probes again, so a recovered engine is used again later in the same run. Quota/crash runs are never reviewed and never consume a fix round; review/verify/fix stay Claude subagents. Without `jbr`, auto chains reduce to `claude_subagent`.

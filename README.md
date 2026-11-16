@@ -374,7 +374,7 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | `description` | Free text **for Jev**: observed speed, defect rate, quota behaviour, model family vs reviewers. Keep it honest and dated; it is the evidence Jev weighs. |
 | `runner` | `agy` \| `codex` \| `muse` \| `hermes` \| `claude_subagent` \| `manual`. Only the first four are executed by `jbr run`; `claude_subagent` packages are implemented by workflow subagents inside `build_dag.js`; `manual` engines are run by the user (`jbr handoff` / `jbr done`, see Manual agy). |
 | `model`, `effort` | Passed to the CLI (`--model`/`-m`, `--effort`/`model_reasoning_effort`). |
-| `parallel_limit` | Informational for Jev (and you); not enforced by `spawn`. |
+| `parallel_limit` | Max runs of this engine at once inside one `build_dag.js` run: a step that finds the engine full waits for a slot (FIFO). The script mirrors these numbers in `DEFAULT_LIMITS` (a test keeps them in sync); `args.engineLimits` overrides per run, `0` = unlimited. Not enforced by `spawn` or `quick`, so separate sessions are not counted. A custom `--engines` file is not read by the script: pass its limits in `engineLimits` (an engine with no limit runs unlimited, logged once). The slot covers the runner's wait; a run declared CRASH while its process lives on can briefly put one extra run on the engine. |
 | `available` | Static on/off switch: `true` for every shipped engine; live probes decide the rest. Override per call with `--available k=yes|no` (a `no` engine probes `UNAVAILABLE disabled`). A single usable engine short-circuits routing without an API call. |
 | `priority` | Chain order, 1 = most preferred. `jbr pick`, `route` (Jev's policy and the fallback chains) and the default `engineChain` follow it. Ties keep engines.json order. |
 | `env` | Optional `{VAR: value}` (`~` expanded) set for the engine's run and its probe, e.g. `lan_qwen`'s `CODEX_HOME`. |
@@ -463,6 +463,8 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
              WP06: "auto" },                       // or omit the package: walk the whole engineChain (DEFAULT)
   engineChain: ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "agy_gemini_flash", "ollama_qwen", "lan_qwen", "hermes_qwen", "claude_subagent"],  // the default
   engineArgs: { agy_gemini_pro: "--timeout 55m" },   // optional extra `jbr spawn` args per engine
+  engineLimits: { agy_gemini_pro: 2 },   // optional; max runs per engine at once (default parallel_limit, 0 = unlimited)
+  engineWaits: { ollama_qwen: 16 },      // optional; 8.75-min marker waits per engine before CRASH (default 8, local Qwen 16)
   jbrArgs: "--engines /c/path/engines.json",          // optional global jbr options for probe + spawn
   fallbackEngine: "claude_subagent",     // optional; appended to every chain as the last resort
   maxFixRounds: 2,

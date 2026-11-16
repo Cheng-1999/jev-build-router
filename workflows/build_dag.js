@@ -31,6 +31,8 @@
 //              WP06: 'auto' },                // or no entry at all (the DEFAULT): walk engineChain
 //   engineChain: ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'agy_gemini_flash', 'ollama_qwen', 'lan_qwen', 'hermes_qwen', 'claude_subagent'],  // default priority order
 //   engineWaits: { ollama_qwen: 16 },          // 8.75-minute marker waits per engine before CRASH (default 8 = ~70 min; local/LAN/Hermes Qwen 16)
+//   engineLimits: { agy_gemini_pro: 2 },       // max runs of one engine at once (default: parallel_limit from engines.json,
+//                                             // mirrored below); a step that finds its engine full waits for a slot
 //   engineArgs: { agy_gemini_pro: '--timeout 55m' },   // extra `python -m jbr spawn` args per engine (optional)
 //   jbrArgs: '--engines /c/path/engines.json',          // global jbr options for probe + spawn (optional)
 //   fallbackEngine: 'claude_subagent',        // appended to every chain as the last resort (default claude_subagent)
@@ -85,6 +87,9 @@ const LAST_RESORT = 'claude_subagent'
 const DEFAULT_CHAIN = ['agy_gemini_pro', 'agy_claude_opus', 'codex_astra', 'agy_gemini_flash', 'ollama_qwen', 'lan_qwen', 'hermes_qwen', LAST_RESORT]
 const ENGINE_CHAIN = Array.isArray(A.engineChain) && A.engineChain.length ? A.engineChain : DEFAULT_CHAIN
 const ENGINE_WAITS = Object.assign({ ollama_qwen: 16, lan_qwen: 16, hermes_qwen: 16 }, A.engineWaits || {})
+// parallel_limit per engine, kept in sync with engines.json by tests/test_workflows.py (a Workflow script cannot read files)
+const DEFAULT_LIMITS = { claude_subagent: 8, agy_claude_opus: 1, agy_gemini_pro: 3, agy_gemini_flash: 5, codex_astra: 2, ollama_qwen: 1, lan_qwen: 1, hermes_qwen: 1, muse_spark: 1 }
+const LIMITS = Object.assign({}, DEFAULT_LIMITS, A.engineLimits || {})
 const FALLBACK = A.fallbackEngine || LAST_RESORT
 const PRE = A.preReview ? Object.assign({ rounds: 'first', effort: 'low', budgetMin: 45 }, A.preReview === true ? {} : A.preReview) : null
 const PRE_WAITS = PRE ? Math.ceil(PRE.budgetMin / 8.5) + 1 : 0   // jbr enforces the budget, so the marker always comes
@@ -110,6 +115,8 @@ function chainFor(id) {
   return uniq([...c, FALLBACK])
 }
 const CHAINS = Object.fromEntries(Object.keys(PKGS).map(id => [id, chainFor(id)]))
+const unlimited = uniq(Object.values(CHAINS).flat()).filter(e => !MANUAL.has(e) && !(LIMITS[e] > 0))
+if (unlimited.length) log(`no parallel limit for ${unlimited.join(', ')}: runs on ${unlimited.length > 1 ? 'them' : 'it'} are not capped (set args.engineLimits)`)
 const engineOf = id => CHAINS[id][0]
 const isManualPkg = id => MANUAL.has(engineOf(id))
 const handoffCmd = id => `cd ${POSIX} && PYTHONPATH="${JBR || '<jev-build-router>'}" python -m jbr --prompts "${PROMPTS}"${JBR_ARGS} --project "${POSIX}" handoff ${id} --engine ${engineOf(id)}`
@@ -237,8 +244,30 @@ async function reviewRound(id, round) {
 
 const statusOf = res => (res && res.engine_status) || 'ok'  // null (agent crashed) = unknown: keep reviewing
 
-// One implement/fix attempt on one engine. kind: 'impl' | 'fix'.
-async function runOn(id, eng, kind, round, findings, fallback) {
+// Per-engine slots: at most LIMITS[eng] runs of one engine at once across all packages. A full engine
+// queues the step (FIFO) rather than skipping it, so the chain order still decides who builds what.
+// A released slot passes straight to the next waiter. No limit (missing / 0) = unlimited.
+const SLOTS = {}
+async function withSlot(eng, who, fn) {
+  const cap = LIMITS[eng]
+  if (!(cap > 0)) return fn()
+  const s = SLOTS[eng] || (SLOTS[eng] = { busy: 0, queue: [] })
+  if (s.busy >= cap) {
+    log(`${who}: ${eng} already has ${cap} run(s) going (its limit); waiting for a slot`)
+    await new Promise(res => s.queue.push(res))
+  } else s.busy += 1
+  try { return await fn() } finally {
+    const next = s.queue.shift()
+    if (next) next(); else s.busy -= 1
+  }
+}
+
+// One implement/fix attempt on one engine, inside that engine's slot. kind: 'impl' | 'fix'.
+function runOn(id, eng, kind, round, findings, fallback) {
+  return withSlot(eng, `${id} ${kind === 'impl' ? 'implement' : 'fix round ' + round}`, () => runOnNow(id, eng, kind, round, findings, fallback))
+}
+
+async function runOnNow(id, eng, kind, round, findings, fallback) {
   const sfx = fallback ? ':fallback' : ''
   const ph = kind === 'impl' ? 'Implement' : 'Fix'
   if (eng === 'claude_subagent') {
