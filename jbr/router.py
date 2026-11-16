@@ -25,7 +25,7 @@ import urllib.request
 import urllib.parse
 from typing import Any, Callable
 
-from jbr import paths
+from jbr import paths, switches
 
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 # Any System One-compatible endpoint: a local Clef server (clef_mlx.py serve -> http://127.0.0.1:8000/v1/systemone,
@@ -60,11 +60,15 @@ SCHEDULING_NOTE = (
 # ----------------------------------------------------------------------------- engines
 
 
-def load_engines(path: str | os.PathLike, overrides: dict[str, bool] | None = None) -> dict[str, dict]:
-    """Load engines.json; `overrides` maps engine key -> available flag (from --available)."""
+def load_engines(path: str | os.PathLike, overrides: dict[str, bool] | None = None, *,
+                 use_switches: bool = True) -> dict[str, dict]:
+    """Load engines.json, apply the saved switches (`jbr enable/disable`, the dashboard), then `overrides`
+    (engine key -> available flag, from --available) on top."""
     engines = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     if "engines" in engines and isinstance(engines["engines"], dict):
         engines = engines["engines"]
+    if use_switches:
+        switches.apply(engines)
     for key, flag in (overrides or {}).items():
         if key not in engines:
             raise KeyError(f"unknown engine {key!r}; known: {sorted(engines)}")
@@ -279,7 +283,7 @@ def assign(project_root: str | os.PathLike, assignments: dict[str, str], engines
         if eng not in engines:
             raise ValueError(f"{wp}: unknown engine {eng!r}; known: {sorted(engines)}")
         if not engines[eng].get("available", True) and is_manual(engines[eng]):
-            raise ValueError(f"{wp}: engine {eng} is disabled (available=false / --available no); assign another")
+            raise ValueError(f"{wp}: engine {eng} is disabled (jbr disable / engines.json available=false / --available no); assign another")
         explicit_ok = engines[eng].get("assign_only") and engines[eng].get("available", True) and \
             (availability or {}).get(eng, {}).get("status", "UNKNOWN") in USABLE_STATUSES
         if eng not in usable and eng != LAST_RESORT and not is_manual(engines[eng]) and not explicit_ok:

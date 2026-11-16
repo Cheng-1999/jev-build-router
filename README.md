@@ -50,6 +50,24 @@ endpoint, set `CLOUDFLARE_AI_TOKEN`, and pass the matching `--model`. An
 arbitrary HTTPS System One endpoint requires `JBR_DECISION_TOKEN`. A Jev key
 is sent only to the default Jev URL.
 
+## Switching engines on and off (`jbr disable` / `jbr dashboard`, since 2026-11-16)
+
+```bash
+PYTHONPATH="$JBR" python -m jbr disable codex_astra --note "subscription ended"   # off for every jbr command here
+PYTHONPATH="$JBR" python -m jbr enable codex_astra                                # on again
+PYTHONPATH="$JBR" python -m jbr reset codex_astra                                 # back to engines.json
+PYTHONPATH="$JBR" python -m jbr engines                                           # every engine: on/off, why, last status
+PYTHONPATH="$JBR" python -m jbr dashboard [--port 8765] [--no-open]               # the same on a local page
+```
+
+A switch is saved in `~/.jbr/engine_switches.json` (beside the engine state; `JBR_SWITCHES` overrides) and applied
+by every engines.json load, so every session, `build_dag.js` runner and probe on the machine obeys it. Precedence,
+lowest first: engines.json `available` < saved switch < `--available` on one command line.
+
+The dashboard serves one page on 127.0.0.1 only: each engine's switch (On / Off / Default), its last known status,
+a Probe button, priority and track record. Loading it never calls an engine. Every change needs the per-launch
+token embedded in the page and a loopback Host header, so another web page open in the browser cannot flip a switch.
+
 ## One task, no plan files (`jbr quick`, since 2026-11-16)
 
 For a single task that is too big to just do in the session but does not deserve a work-package plan:
@@ -86,6 +104,7 @@ from 2026-10-24 and are back on by the owner's decision (2026-11-06), with the a
 | 3 | `agy_gemini_flash` | agy, `gemini-3.8-flash-high` (pinned); separate quota bucket from Argon (2026-10-19: Argon exhausted 145 h while Flash answered); unproven, review strictly |
 | 4 | `ollama_qwen` | local Qwen 3.8 27B on Ollama via codex `--oss` (Mac only; free, slow; runners wait ~140 min) |
 | 4 | `lan_qwen` | Qwen on a LAN OpenAI-compatible server, codex with `CODEX_HOME=~/.codex-local` (free; needs `LOCAL_LLM_KEY`; runners wait ~140 min) |
+| 4 | `hermes_qwen` | the same local Qwen 3.8 27B on Ollama, driven by Hermes Agent instead of codex (`hermes chat --query-file … --oneshot --yolo`); works without a Codex subscription; no workspace sandbox; unproven, review strictly |
 | 5 | `claude_subagent` | Claude Code workflow subagent; last resort, never quota-probed |
 | (4) | `muse_spark` | **assign only**: Meta Muse Code, `muse exec` on `muse-spark-1.3-contributor` (Meta may train on what it is sent; needs billing set up at dev.meta.ai). Never in a chain, `pick` or Jev |
 
@@ -225,11 +244,12 @@ Nothing is written into the project. Per project (key = its absolute path with s
 ~/.jbr/runs/<key>/queue.json     the backlog lane, plus worker.lock, worker.log and worktrees/
 ~/.jbr/ledger.jsonl              engine ledger (all projects)
 ~/.jbr/engine_state.json         quota / availability state
+~/.jbr/engine_switches.json      saved on/off switches (jbr enable / disable / dashboard)
 ~/.jbr/ocr-home/                 prereview's private HOME for ocr (config with the local provider only, ocr sessions)
 ```
 
 `python -m jbr --project <root> paths` prints them; pass `.reports_dir` to the Workflow scripts as `reportsDir`.
-`JBR_RUNS`, `JBR_LEDGER`, `JBR_STATE` override the locations. `--reports <dir>` still works (relative = inside the project).
+`JBR_RUNS`, `JBR_LEDGER`, `JBR_STATE`, `JBR_SWITCHES` override the locations. `--reports <dir>` still works (relative = inside the project).
 
 ## Backlog lane (`jbr queue`)
 
@@ -314,7 +334,7 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | field | meaning |
 |---|---|
 | `description` | Free text **for Jev**: observed speed, defect rate, quota behaviour, model family vs reviewers. Keep it honest and dated; it is the evidence Jev weighs. |
-| `runner` | `agy` \| `codex` \| `muse` \| `claude_subagent` \| `manual`. Only the first three are executed by `jbr run`; `claude_subagent` packages are implemented by workflow subagents inside `build_dag.js`; `manual` engines are run by the user (`jbr handoff` / `jbr done`, see Manual agy). |
+| `runner` | `agy` \| `codex` \| `muse` \| `hermes` \| `claude_subagent` \| `manual`. Only the first four are executed by `jbr run`; `claude_subagent` packages are implemented by workflow subagents inside `build_dag.js`; `manual` engines are run by the user (`jbr handoff` / `jbr done`, see Manual agy). |
 | `model`, `effort` | Passed to the CLI (`--model`/`-m`, `--effort`/`model_reasoning_effort`). |
 | `parallel_limit` | Informational for Jev (and you); not enforced by `spawn`. |
 | `available` | Static on/off switch: `true` for every shipped engine; live probes decide the rest. Override per call with `--available k=yes|no` (a `no` engine probes `UNAVAILABLE disabled`). A single usable engine short-circuits routing without an API call. |
@@ -323,9 +343,11 @@ Mapping `engine_key -> {description, runner, model, effort, parallel_limit, avai
 | `windows_sandbox` | Optional codex sandbox used instead of `workspace-write` on Windows only (`danger-full-access` where the sandboxed shell fails with `CryptUnprotectData failed`). |
 | `effort` | An empty string drops `model_reasoning_effort` (servers that take no effort). |
 | `assign_only` | `true`: never in an automatic chain, `pick`, or Jev's choices, and no live probe from `availability`/`route`. Only `assign WP=<engine>` (or a build_dag pin) uses it, and that run's own probe checks it. For engines with a cost you choose per package, such as `muse_spark` sending code to Meta. |
+| `provider` / `base_url` / `max_turns` / `ignore_user_config` | hermes only: `--provider`, `--base-url` (an OpenAI-compatible endpoint such as local Ollama's `http://localhost:11434/v1`), `--max-turns`, and `--ignore-user-config` (keeps the user's Hermes plugins, MCP servers, hooks and personal context out of the run). The run budget comes from the timeout. |
+| `timeout` | Optional engine time limit used when `run`/`spawn`/`quick` get no `--timeout` (default 55m); `hermes_qwen` has 130m, since its `--run-budget` ends the run. |
 | `contributor_mode` / `max_model_steps` | muse only: `--contributor-mode on\|off` and `--max-model-steps N`. |
 
-Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `agy_gemini_flash`, `agy_manual`, `codex_astra`, `ollama_qwen`, `lan_qwen`, `muse_spark`.
+Default keys: `claude_subagent`, `agy_claude_opus`, `agy_gemini_pro`, `agy_gemini_flash`, `agy_manual`, `codex_astra`, `ollama_qwen`, `lan_qwen`, `hermes_qwen`, `muse_spark`.
 
 **muse_spark (2026-10-24).** Runs `muse exec --model <m> --workspace <root> --prompt-file <prompt> --disable-approval --disable-request-user-input --no-foreign-personal-context --reasoning-effort <e> --contributor-mode on`. The CLI reads the prompt file itself. Approvals are off because nobody can answer them headless; the OS sandbox stays on (never `--yolo`), and personal rules and skills from other agents are not loaded. The probe sends `Reply only READY.` with shell, writes, web and session log all off. `API error 402 ... Billing verification failed` gives UNAVAILABLE on probe and CRASH on a run (not QUOTA). On 2026-10-24 that is what this account returned, even on the contributor model, so it needs billing set up at dev.meta.ai. For private code, override with model `muse-spark-1.3` and `contributor_mode: off` (paid, not used for training).
 
@@ -401,7 +423,7 @@ Both scripts read everything from `args`; nothing project-specific is hard-coded
   routing: { WP04: ["agy_claude_opus", "codex_astra", "claude_subagent"],   // routing.json .chains (list)
              WP05: "codex_astra",                  // string: pin, then the engineChain entries after it
              WP06: "auto" },                       // or omit the package: walk the whole engineChain (DEFAULT)
-  engineChain: ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "agy_gemini_flash", "ollama_qwen", "lan_qwen", "claude_subagent"],  // the default
+  engineChain: ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "agy_gemini_flash", "ollama_qwen", "lan_qwen", "hermes_qwen", "claude_subagent"],  // the default
   engineArgs: { agy_gemini_pro: "--timeout 55m" },   // optional extra `jbr spawn` args per engine
   jbrArgs: "--engines /c/path/engines.json",          // optional global jbr options for probe + spawn
   fallbackEngine: "claude_subagent",     // optional; appended to every chain as the last resort

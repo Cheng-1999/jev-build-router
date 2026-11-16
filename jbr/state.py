@@ -323,6 +323,19 @@ def probe_command(engine: dict) -> list[str] | None:
         # codex itself sends ~140k tokens of context: minutes on a local model, past PROBE_TIMEOUT_S.
         # Ask Ollama directly instead (seconds); it fails fast when the server or model is missing.
         return [_bin("ollama"), "run", "--think=false", model, PROBE_PROMPT]
+    if r == "hermes":
+        if not shutil.which(_bin("hermes")):
+            return [_bin("hermes"), "--version"]  # missing binary: run() raises OSError -> UNAVAILABLE "cannot run hermes"
+        if engine.get("local_provider") == "ollama":
+            # Hermes sends its own large context: slow on a local model. The binary is there, so ask Ollama
+            # directly whether the model answers (seconds), as for ollama_qwen.
+            return [_bin("ollama"), "run", "--think=false", model, PROBE_PROMPT]
+        cmd = [_bin("hermes"), "chat", "-q", PROBE_PROMPT, "--oneshot", "--quiet", "-m", model, "--max-turns", "1"]
+        if engine.get("provider"):
+            cmd += ["--provider", engine["provider"]]
+        if engine.get("base_url"):
+            cmd += ["--base-url", engine["base_url"]]
+        return cmd
     if r == "muse":
         # one tiny prompt, every tool off, nothing logged, no personal context; workspace = the state dir (cwd)
         cmd = [_bin("muse"), "exec", "--model", model, "--reasoning-effort", "low", "--disable-shell", "--disable-write",
@@ -380,7 +393,7 @@ def probe(engine_key: str, engines: dict[str, dict], *, live: bool = True, now: 
         # never chosen by pick/route/the chain: only an explicit `jbr assign WP=<engine>` hands work to it
         return Probe(engine_key, UNAVAILABLE, detail="manual: run by the user (jbr handoff / jbr done), never automatically")
     if not eng.get("available", True):
-        return Probe(engine_key, UNAVAILABLE, detail="disabled (available=false / --available no)")
+        return Probe(engine_key, UNAVAILABLE, detail="disabled (jbr disable / engines.json available=false / --available no)")
     p = path or state_path()
     bucket = bucket_of(engine_key, eng)
     hit = _from_record(engine_key, load(p).get(bucket, {}), now or clock())

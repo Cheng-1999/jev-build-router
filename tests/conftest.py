@@ -44,6 +44,7 @@ def project(tmp_path):
 @pytest.fixture(autouse=True)
 def isolated_engine_state(tmp_path, monkeypatch):
     """Every test gets its own engine state file: never touch ~/.jbr, never inherit a real quota."""
+    monkeypatch.delenv("JBR_SWITCHES", raising=False)  # the switches then follow JBR_STATE below, per test
     path = tmp_path / "jbr-state" / "engine_state.json"
     monkeypatch.setenv("JBR_STATE", str(path))
     # ...and its own runs dir and ledger: no test writes run artifacts or ledger lines under the real ~/.jbr
@@ -74,7 +75,7 @@ def engines():
     before that keep their two-engine fixture."""
     from jbr import router
     return router.load_engines(REPO / "engines.json", {"agy_gemini_pro": True, "agy_claude_opus": False, "codex_astra": False,
-                                                         "agy_gemini_flash": False, "ollama_qwen": False, "lan_qwen": False, "agy_manual": False, "muse_spark": False})
+                                                         "agy_gemini_flash": False, "ollama_qwen": False, "lan_qwen": False, "hermes_qwen": False, "agy_manual": False, "muse_spark": False})
 
 
 @pytest.fixture
