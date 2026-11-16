@@ -1,4 +1,4 @@
-"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done|inbox|quick
+"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done|inbox|quick|engines|enable|disable|reset|dashboard
 
 Global options (before the subcommand):
   --project <root>          project root (default: cwd)
@@ -19,6 +19,10 @@ Quick: `quick "<task>"` writes a one-package plan under ~/.jbr/runs/<key>/quick/
 picks the first available external engine (or takes --engine), spawns it and prints the `wait` command, the
 review_level.js args and a retry line. No external engine available: the plan is kept and it exits 3.
 
+Switches: `disable <engine>` / `enable <engine>` / `reset <engine>` save an on/off switch in
+~/.jbr/engine_switches.json that every jbr command obeys (engines.json < switch < --available);
+`engines` lists them with each engine's last known status; `dashboard` serves the same on a local page.
+
 Manual engines (runner "manual", e.g. agy_manual): jbr never runs them. `handoff <WP>` writes the
 packet and prints the line to paste into the engine you run yourself; `done <WP>` records the outcome
 (.done marker), after which review_level.js reviews it like any other run.
@@ -32,7 +36,7 @@ import re
 import shlex
 import sys
 
-from jbr import paths, prereview, router, runner, state
+from jbr import paths, prereview, router, runner, state, switches
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_ENGINES = REPO_ROOT / "engines.json"
@@ -66,7 +70,7 @@ def _parser() -> argparse.ArgumentParser:
     x.add_argument("--extra", default="", help="additional manager instructions")
     x.add_argument("--extra-file", default=None, help="file with additional instructions (e.g. fix-WP-round1.md)")
     x.add_argument("--tag", default="")
-    x.add_argument("--timeout", default=runner.DEFAULT_TIMEOUT)
+    x.add_argument("--timeout", default=None, help="engine time limit (default: the engine's `timeout` in engines.json, else 55m)")
     x.add_argument("--dry-run", action="store_true", help="compose prompt and print the command only")
 
     s = sub.add_parser("spawn", help="launch `run` detached for one or more packages")
@@ -75,7 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--extra", default="")
     s.add_argument("--extra-file", default=None)
     s.add_argument("--tag", default="")
-    s.add_argument("--timeout", default=runner.DEFAULT_TIMEOUT)
+    s.add_argument("--timeout", default=None, help="engine time limit (default: the engine's `timeout`, else 55m)")
     s.add_argument("--dry-run", action="store_true", help="print the argv without launching")
 
     w = sub.add_parser("wait", help="block until the .done markers exist")
@@ -192,9 +196,22 @@ def _parser() -> argparse.ArgumentParser:
     qk.add_argument("--engine", default=None, help="skip the pick and use this engine")
     qk.add_argument("--exclude", default="", help="comma-separated engines the pick skips (e.g. the one that just hit quota)")
     qk.add_argument("--no-live", action="store_true", help="pick from the state file only; never probe an engine")
-    qk.add_argument("--timeout", default=runner.DEFAULT_TIMEOUT)
+    qk.add_argument("--timeout", default=None, help="engine time limit (default: the engine's `timeout`, else 55m)")
     qk.add_argument("--dry-run", action="store_true",
                     help="still WRITES the plan (a new id) and prints the argv; launches nothing and probes nothing live")
+
+    en = sub.add_parser("engines", help="every engine: on/off (and why), last known status, priority; never probes")
+    en.add_argument("--json", action="store_true")
+    for name, what in (("enable", "switch engines on for every jbr command on this machine"),
+                       ("disable", "switch engines off for every jbr command on this machine"),
+                       ("reset", "remove the saved switch: back to engines.json")):
+        sw = sub.add_parser(name, help=what)
+        sw.add_argument("engine_keys", nargs="+", metavar="ENGINE")
+        if name != "reset":
+            sw.add_argument("--note", default="", help="why (shown by `jbr engines` and the dashboard)")
+    db = sub.add_parser("dashboard", help="local page (127.0.0.1) to see engines and switch them on or off")
+    db.add_argument("--port", type=int, default=8765)
+    db.add_argument("--no-open", action="store_true", help="do not open a browser")
 
     pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
     pk.add_argument("--exclude", default="", help="comma-separated engine keys to skip")
@@ -307,7 +324,9 @@ def cmd_spawn(a) -> int:
             return 2
         # the child runs with cwd=project: paths given relative to THIS cwd must be made absolute
         run_args = ["--engine", engine_key, "--engines", str(pathlib.Path(a.engines).resolve()),
-                    "--packages", a.packages, "--prompts", a.prompts, "--timeout", a.timeout]
+                    "--packages", a.packages, "--prompts", a.prompts]
+        if a.timeout:  # unset: the child uses the engine's own `timeout`
+            run_args += ["--timeout", a.timeout]
         if a.reports:  # None (the default) must not reach the child's argv
             run_args += ["--reports", a.reports]
         for ov in a.available:
@@ -341,7 +360,44 @@ def cmd_pick(a) -> int:
     return 0
 
 
-SLOW_ENGINES = {"ollama_qwen": 140, "lan_qwen": 140}  # wait minutes; the rest finish within the default 70
+def cmd_engines(a) -> int:
+    from jbr import dashboard
+    rows = dashboard.engine_rows(a.engines)
+    if a.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print(f"{'engine':<18} {'on':<4} {'why':<40} {'prio':>4}  status")
+    for r in rows:
+        sw = r["switch"]
+        why = (f"switch {sw.get('at', '')[:10]}" + (f": {sw['note']}" if sw.get("note") else "")) if sw else "engines.json"
+        print(f"{r['engine']:<18} {'on' if r['on'] else 'off':<4} {why[:40]:<40} {r['priority'] if r['priority'] is not None else '':>4}  {r['status_line']}")
+    print(f"switches: {switches.switches_path()}")
+    return 0
+
+
+def cmd_switch(a) -> int:
+    known = router.load_engines(a.engines, use_switches=False)
+    unknown = [k for k in a.engine_keys if k not in known]
+    if unknown:
+        print(f"unknown engine(s) {unknown}; known: {sorted(known)}", file=sys.stderr)
+        return 2
+    flag = {"enable": True, "disable": False, "reset": None}[a.cmd]
+    for k in a.engine_keys:
+        switches.set_switch(k, flag, getattr(a, "note", ""))
+        state_word = {True: "on", False: "off", None: f"back to engines.json ({'on' if known[k].get('available', True) else 'off'})"}[flag]
+        print(f"{k}: {state_word}")
+    if flag is False and "claude_subagent" in a.engine_keys:
+        print("note: claude_subagent is still the last resort when every other engine is out (pick/route fall back to it)")
+    return 0
+
+
+def cmd_dashboard(a) -> int:
+    from jbr import dashboard
+    dashboard.serve(a.engines, port=a.port, open_browser=not a.no_open)
+    return 0
+
+
+SLOW_ENGINES = {"ollama_qwen": 140, "lan_qwen": 140, "hermes_qwen": 140}  # wait minutes; the rest finish within the default 70
 
 
 def cmd_quick(a) -> int:
@@ -403,7 +459,9 @@ def cmd_quick(a) -> int:
         print(f"retry later: {jbr} quick --id {qid}")
         return 3
     run_args = ["--engine", engine_key, "--engines", str(pathlib.Path(a.engines).resolve()),
-                "--packages", str(qp["packages"]), "--prompts", str(qp["prompts"]), "--timeout", a.timeout]
+                "--packages", str(qp["packages"]), "--prompts", str(qp["prompts"])]
+    if a.timeout:
+        run_args += ["--timeout", a.timeout]
     if a.reports:
         run_args += ["--reports", a.reports]
     for ov in a.available:
@@ -430,7 +488,7 @@ def cmd_quick(a) -> int:
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
 # sub-options that take one value: the token after them is a VALUE, never a global option
 VALUE_OPTS = {"--from", "--status", "--exit", "--minutes", "--notes", "--notes-file", "--reason", "--build", "--base", "--test-cmd", "--max", "--test-timeout-min", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
-              "--model", "--timeout-min", "--poll", "--exclude", "--task-file", "--id", "--files", "--accept", "--commit", "--url", "--backend-engine", "--effort", "--budget-min"}
+              "--model", "--timeout-min", "--poll", "--exclude", "--task-file", "--id", "--files", "--accept", "--note", "--port", "--commit", "--url", "--backend-engine", "--effort", "--budget-min"}
 
 
 def _hoist_globals(argv: list[str]) -> list[str]:
@@ -439,7 +497,8 @@ def _hoist_globals(argv: list[str]) -> list[str]:
         return argv
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
                     {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths", "queue",
-                     "prereview", "handoff", "done", "inbox", "quick"}), None)
+                     "prereview", "handoff", "done", "inbox", "quick", "engines",
+                     "enable", "disable", "reset", "dashboard"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
@@ -857,7 +916,8 @@ def main(argv: list[str] | None = None) -> int:
             "compose-fix": cmd_compose_fix, "status": cmd_status, "probe": cmd_probe, "pick": cmd_pick,
             "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths, "queue": cmd_queue,
             "prereview": cmd_prereview, "handoff": cmd_handoff, "done": cmd_done, "inbox": cmd_inbox,
-            "quick": cmd_quick}[a.cmd](a)
+            "quick": cmd_quick, "engines": cmd_engines, "enable": cmd_switch, "disable": cmd_switch,
+            "reset": cmd_switch, "dashboard": cmd_dashboard}[a.cmd](a)
 
 
 if __name__ == "__main__":

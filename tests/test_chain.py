@@ -28,7 +28,7 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
 @pytest.fixture
 def all_engines():
     """engines.json as shipped, cloud engines only: local and LAN Qwen off (their place in the chain has its own tests)."""
-    return router.load_engines(REPO / "engines.json", {**AGY_ON, "ollama_qwen": False, "lan_qwen": False})
+    return router.load_engines(REPO / "engines.json", {**AGY_ON, "ollama_qwen": False, "lan_qwen": False, "hermes_qwen": False})
 
 
 class FakeRun:
@@ -230,7 +230,7 @@ def test_cli_pick_prints_first_available(all_engines, monkeypatch, capsys):
     assert capsys.readouterr().out.strip() == "ollama_qwen"        # local Qwen before Claude's quota
     assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,agy_gemini_flash,ollama_qwen"]) == 0
     assert capsys.readouterr().out.strip() == "lan_qwen"           # LAN Qwen next, still before Claude
-    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,agy_gemini_flash,ollama_qwen,lan_qwen"]) == 0
+    assert cli.main(AGY_FLAGS + ["pick", "--exclude", "agy_claude_opus,codex_astra,agy_gemini_flash,ollama_qwen,lan_qwen,hermes_qwen"]) == 0
     assert capsys.readouterr().out.strip() == "claude_subagent"
 
 
@@ -347,6 +347,7 @@ def test_route_passes_priority_and_live_status_and_writes_chains(project, packag
                                   # local Qwen switched off by the fixture: listed for context, never offered
                                   {"engine": "ollama_qwen", "priority": 4, "live_status": "UNAVAILABLE"},
                                   {"engine": "lan_qwen", "priority": 4, "live_status": "UNAVAILABLE"},
+                                  {"engine": "hermes_qwen", "priority": 4, "live_status": "UNAVAILABLE"},
                                   {"engine": "claude_subagent", "priority": 5, "live_status": "AVAILABLE"}]
     assert "live_status: EXHAUSTED until 2026-10-02T03:09:31Z" in st["engines"]["agy_gemini_pro"]
     assert "chain priority 1" in st["engines"]["agy_gemini_pro"]
@@ -403,7 +404,7 @@ def test_cli_route_probes_engines_and_follows_the_chain(project, monkeypatch, ca
     captured = {}
     monkeypatch.setattr(router.urllib.request, "urlopen", _jev(captured, lambda q, crit: "agy_claude_opus"))
     monkeypatch.setenv("TYPESAFE_API_KEY", "k-test")
-    assert cli.main(AGY_FLAGS + ["--project", str(project), "route"]) == 0
+    assert cli.main(AGY_FLAGS + ["--available", "hermes_qwen=no", "--project", str(project), "route"]) == 0
     out, err = capsys.readouterr()
     assert sorted(probed) == ["claude-opus-5-5-high", "gemini-3.1-pro-high", "gemini-3.8-flash-high", "gpt-6-astra",
                               "qwen3.8-flash-next-iq2_xs", "qwen3.8:27b-mlx"]
@@ -525,7 +526,7 @@ def test_build_dag_whole_chain_dead_is_blocked_without_review():
 
 def test_build_dag_waits_longer_for_local_qwen():
     src = BUILD_DAG.read_text(encoding="utf-8")
-    assert "const ENGINE_WAITS = Object.assign({ ollama_qwen: 16, lan_qwen: 16 }, A.engineWaits || {})" in src
+    assert "const ENGINE_WAITS = Object.assign({ ollama_qwen: 16, lan_qwen: 16, hermes_qwen: 16 }, A.engineWaits || {})" in src
     assert "up to ${ENGINE_WAITS[eng] || 8} times" in src and "No marker after ${ENGINE_WAITS[eng] || 8} waits" in src
 
 

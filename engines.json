@@ -68,6 +68,20 @@
     "available": true,
     "priority": 4
   },
+  "hermes_qwen": {
+    "description": "Local Qwen 3.8 27B (MLX) on Ollama, driven by Hermes Agent (`hermes chat --query-file ... --oneshot --yolo`) instead of the Codex CLI: a second harness for the same free local model, added 2026-11-16 so local Qwen keeps working without a Codex subscription. Unproven: no build has run through it yet, so review strictly and compare its minutes with ollama_qwen. Hermes has no workspace sandbox (codex has workspace-write): the repo rules in the prompt are the only fence. Runs with --ignore-user-config, so the user's Hermes plugins, MCP servers, hooks and personal context stay out of the unattended run. Only where Ollama and hermes run (the Mac); elsewhere its probe fails and the chain skips it. Runners wait up to ~140 min for it.",
+    "runner": "hermes",
+    "local_provider": "ollama",
+    "provider": "custom",
+    "base_url": "http://localhost:11434/v1",
+    "model": "qwen3.8:27b-mlx",
+    "effort": "high",
+    "parallel_limit": 1,
+    "available": true,
+    "priority": 4,
+    "timeout": "130m",
+    "ignore_user_config": true
+  },
   "muse_spark": {
     "description": "Meta Muse Code CLI (`muse exec`, headless use documented by Meta for scripts/CI) on Muse Spark 1.3, contributor tier: Meta may use what it is sent (the package's code) to train its models, so ONLY for code you are fine sharing, never private repos. ASSIGN ONLY: never in an automatic chain, `pick` or Jev; only `jbr assign WP=muse_spark` hands work to it. Needs billing set up at dev.meta.ai: on 2026-10-24 this account got `API error 402 Billing verification failed` even on the contributor model (no subscription). Runs with approvals off and the OS sandbox on; personal rules/skills from other agents are not loaded. Quality unproven (no independent benchmark yet): review strictly. Non-training variant: model muse-spark-1.3 with contributor_mode off (paid).",
     "runner": "muse",

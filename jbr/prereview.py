@@ -413,7 +413,7 @@ def prereview(project_root: str | os.PathLike, wp_id: str, engines: dict[str, di
             return finish(SKIPPED, f"{binary} is a cmd.exe launcher: set JBR_OCR_BIN to the release opencodereview.exe")
         backend = engines.get(backend_engine) or {}
         if backend and not backend.get("available", True):
-            return finish(SKIPPED, f"backend engine {backend_engine} is disabled (available=false / --available no)")
+            return finish(SKIPPED, f"backend engine {backend_engine} is disabled (jbr disable / engines.json available=false / --available no)")
         model = model or backend.get("model", "")
         res["model"] = model
         if not model:

@@ -191,13 +191,47 @@ def build_command(engine: dict, prompt_file: pathlib.Path, project_root: pathlib
         if engine.get("max_model_steps"):
             cmd += ["--max-model-steps", str(engine["max_model_steps"])]
         return cmd
+    if runner == "hermes":
+        # Hermes Agent, headless: reads the prompt file itself (nothing shell-interpreted), answers and exits.
+        # --yolo: no one can answer an approval prompt headless. Hermes has no workspace sandbox like codex's
+        # workspace-write, so the repo rules in the prompt are the only fence (same trust as agy).
+        cmd = ["hermes", "chat", "--query-file", str(prompt_file), "--oneshot", "--quiet", "--yolo",
+               "--in", str(project_root), "-m", model]
+        if engine.get("provider"):
+            cmd += ["--provider", engine["provider"]]
+        if engine.get("base_url"):
+            cmd += ["--base-url", engine["base_url"]]
+        if effort:
+            cmd += ["--reasoning", effort]
+        if engine.get("max_turns"):
+            cmd += ["--max-turns", str(engine["max_turns"])]
+        if engine.get("ignore_user_config"):
+            # keep the user's ~/.hermes plugins, MCP servers, hooks and personal context out of an unattended
+            # --yolo run (and out of a small local model's context); provider and model come from argv
+            cmd.append("--ignore-user-config")
+        budget = duration_seconds(timeout)
+        if budget:
+            cmd += ["--run-budget", str(budget)]
+        return cmd
     if runner == "agy":
         cmd = ["agy", "-p", pointer, "--model", model, "--dangerously-skip-permissions", "--print-timeout", timeout]
         if not model.removeprefix(models.AUTO).startswith("claude"):
             # agy rejects --effort for Claude thinking models (their thinking is the boost)
             cmd += ["--effort", effort]
         return cmd
-    raise ValueError(f"unknown runner {runner!r} (expected agy|codex|muse|claude_subagent|manual)")
+    raise ValueError(f"unknown runner {runner!r} (expected agy|codex|muse|hermes|claude_subagent|manual)")
+
+
+_DURATION_RE = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$")
+
+
+def duration_seconds(text: str) -> int:
+    """'55m' / '1h30m' / '90s' / '300' -> seconds; 0 when it cannot be parsed."""
+    m = _DURATION_RE.match((text or "").strip())
+    if not m or not any(m.groups()):
+        return 0
+    h, mi, s = (int(g) if g else 0 for g in m.groups())
+    return h * 3600 + mi * 60 + s
 
 
 # ----------------------------------------------------------------------------- classification
@@ -265,9 +299,11 @@ def engine_env(engine: dict | None) -> dict[str, str]:
 
 def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: dict[str, dict],
         packages_path: str | os.PathLike, prompts_dir: str | os.PathLike = "ops/prompts", *,
-        extra: str = "", tag: str = "", timeout: str = DEFAULT_TIMEOUT, dry_run: bool = False,
+        extra: str = "", tag: str = "", timeout: str | None = None, dry_run: bool = False,
         reports_dir: str | None = None, rules: str | None = None) -> dict[str, Any]:
     """Compose the prompt, run the engine synchronously, write the .done marker.
+
+    `timeout` None: the engine's own `timeout` from engines.json, else DEFAULT_TIMEOUT.
 
     Returns {"wp", "engine", "cmd", "exit", "minutes", "paths"}; exit is None on dry-run
     and "workflow" when the engine is claude_subagent.
@@ -299,7 +335,7 @@ def run(project_root: str | os.PathLike, wp_id: str, engine_key: str, engines: d
         prompt = compose_prompt(root, wp, prompts_dir, extra, rules or meta.get("rules"))
         paths["prompt"].write_text(prompt, encoding="utf-8")
 
-        cmd = build_command(engine, paths["prompt"], root, paths["last"], timeout)
+        cmd = build_command(engine, paths["prompt"], root, paths["last"], timeout or engine.get("timeout") or DEFAULT_TIMEOUT)
         result["cmd"] = cmd
         if cmd is None:
             result["exit"] = "workflow"

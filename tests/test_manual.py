@@ -241,7 +241,7 @@ def test_build_dag_default_chain_puts_automated_agy_first():
     rc, out = run_workflow(BUILD_DAG, args, {"runs": {"impl:WP01:agy_gemini_pro": ok}})
     assert rc == 0, out
     assert out["result"][0]["chain"] == ["agy_gemini_pro", "agy_claude_opus", "codex_astra", "agy_gemini_flash",
-                                         "ollama_qwen", "lan_qwen", "claude_subagent"]
+                                         "ollama_qwen", "lan_qwen", "hermes_qwen", "claude_subagent"]
     assert not any("agy_manual" in c for c in out["calls"])
 
 
@@ -250,7 +250,7 @@ def test_shipped_engines_have_automated_agy_on_and_it_can_be_switched_off(all_en
     assert {"agy_gemini_pro", "agy_claude_opus", "agy_gemini_flash"} <= set(automated_agy)
     assert all(all_engines[k]["available"] for k in automated_agy)  # back on since 2026-11-06, user's decision
     off = router.load_engines(REPO / "engines.json", {k: False for k in automated_agy})  # --available <engine>=no
-    assert state.probe("agy_gemini_pro", off).line() == "UNAVAILABLE disabled (available=false / --available no)"
+    assert state.probe("agy_gemini_pro", off).line() == "UNAVAILABLE disabled (jbr disable / engines.json available=false / --available no)"
     assert not any(k in router.usable_engines(off) for k in automated_agy)
 
 

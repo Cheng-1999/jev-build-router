@@ -54,7 +54,7 @@ def _engine(calls):
     return run
 
 
-ENGINES = router.load_engines(REPO / "engines.json")
+ENGINES = router.load_engines(REPO / "engines.json", use_switches=False)  # import time: before the per-test isolation
 
 
 def test_add_validates_against_the_plan_and_skips_duplicates(repo):
