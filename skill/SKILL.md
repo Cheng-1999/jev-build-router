@@ -17,7 +17,7 @@ JBR=/c/Users/a8878/dev/jev-build-router   # Mac: /Users/ad/code/jev-build-router
 cd <project> && PYTHONPATH="$JBR" python -m jbr --help
 ```
 
-## One task: `jbr quick` (2026-11-16)
+## One task: `jbr quick` and `--team` (2026-11-16)
 
 A single implementation task (a bug fix or feature over ~3+ files, or a refactor) needs no plan files:
 `PYTHONPATH="$JBR" python -m jbr --project . quick "<task, with enough detail to do it without asking>" [--files a,b]
@@ -26,6 +26,15 @@ the printed `wait` line. OK: run `review_level.js` with the printed args (never 
 and the printed fix `spawn` if it found defects. QUOTA/CRASH: run the printed retry line. Exit 3 (no external
 engine): do the task yourself. Several independent tasks: one `quick` each, or write a plan and use `build_dag.js`.
 Keep in the session: small edits, legal/user-facing wording, and anything needing this session's tools (GPU/Blender, local apps).
+
+**When to use `--team <team> [--role <role>]`**: use `--team` when the user has configured named teams in
+`~/.jbr/teams.json` (`jbr teams`, `jbr teams init`, `jbr team-set`, or `jbr dashboard`) and the task belongs to a
+specific team or role (e.g. `--team marketing --role drafter` for drafting docs/copy, `--team marketing --role editor`
+for editing, or `--team engineering --role builder` when the user curated a role-specific engine order and role
+instructions). `quick --team T [--role R]` walks that role's engine list in order (instead of global `priority`),
+prepends the role's instructions (`## Role: T/R`) to the spec, and for `kind: "doc"` teams sets `review_level.js`
+`mode: "doc"` (prose + criteria review without running a test suite or mutation check). For multi-role pipelines
+(e.g. drafter -> editor), run one role after another from the session, reviewing each step before starting the next.
 
 ## Engine switches are the user's (2026-11-16)
 

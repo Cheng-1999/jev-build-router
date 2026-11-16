@@ -130,3 +130,71 @@ def test_dashboard_refuses_framing_and_odd_bodies(server):
         urllib.request.urlopen(r, timeout=10)
     except urllib.error.HTTPError as e:
         assert e.code == 400  # body ignored: empty object, no engine
+
+
+def test_dashboard_teams_get_and_post_security_and_validation(server, monkeypatch):
+    from jbr import teams
+    url, token = server
+    monkeypatch.setattr(state.subprocess, "run", lambda *a, **k: pytest.fail("/api/teams must not probe"))
+
+    # Page contains the Teams section and controls
+    code, page_html = _req(url, "/")
+    assert code == 200 and 'id="teams-h">Teams</h2>' in page_html and "save-teams" in page_html
+
+    # GET /api/teams
+    code, body = _req(url, "/api/teams")
+    data = json.loads(body)
+    assert code == 200 and data["teams"] == {} and data["errors"] == []
+    assert "codex_astra" in data["engines"] and "agy_manual" not in data["engines"]
+
+    valid_payload = {"teams": teams.example()}
+    # Bad/missing token -> 403
+    assert _req(url, "/api/teams", data=valid_payload)[0] == 403
+    assert _req(url, "/api/teams", data=valid_payload, token="wrong")[0] == 403
+    # Foreign Host -> 403
+    assert _req(url, "/api/teams", host="evil.example:80")[0] == 403
+    assert _req(url, "/api/teams", data=valid_payload, token=token, host="evil.example:80")[0] == 403
+    assert teams.load() == {}
+
+    # Invalid body / validation errors -> 400, nothing written
+    assert _req(url, "/api/teams", data=[], token=token)[0] == 400
+    assert _req(url, "/api/teams", data={"no_teams_key": 1}, token=token)[0] == 400
+    code, err_body = _req(url, "/api/teams", data={"teams": {"Bad!": {"kind": "doc", "roles": {"r": {"engines": ["agy_manual"]}}}}}, token=token)
+    assert code == 400
+    err_json = json.loads(err_body)
+    assert any("invalid name" in e for e in err_json["errors"]) and any("manual engine" in e for e in err_json["errors"])
+    assert not teams.teams_path().exists()
+
+    # Oversize body (> 64 KB) -> 400, nothing written
+    big = {"teams": {"marketing": {"kind": "doc", "description": "x" * 70_000, "roles": {"drafter": {"engines": ["claude_subagent"]}}}}}
+    assert _req(url, "/api/teams", data=big, token=token)[0] == 400
+    assert not teams.teams_path().exists()
+
+    # Valid POST /api/teams saves and round-trips through GET /api/teams
+    code, ok_body = _req(url, "/api/teams", data=valid_payload, token=token)
+    assert code == 200 and json.loads(ok_body)["ok"] is True
+    assert set(teams.load()) == {"marketing", "engineering"}
+    code, get_body = _req(url, "/api/teams")
+    assert code == 200 and set(json.loads(get_body)["teams"]) == {"marketing", "engineering"}
+
+
+
+def test_dashboard_never_overwrites_a_malformed_teams_file(server):
+    from jbr import teams
+    url, token = server
+    p = teams.teams_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"teams": {"marketing": {},}}', encoding="utf-8")  # hand-edit typo: trailing comma
+    code, body = _req(url, "/api/teams")
+    data = json.loads(body)
+    assert code == 200 and data["teams"] == {} and data["file_error"] and "malformed" in data["errors"][0]
+    good = {"teams": {"sales": {"kind": "doc", "roles": {"writer": {"engines": ["codex_astra"]}}}}}
+    code, body = _req(url, "/api/teams", data=good, token=token)
+    assert code == 409 and "nothing was written" in json.loads(body)["error"]
+    assert p.read_text(encoding="utf-8") == '{"teams": {"marketing": {},}}'
+
+
+def test_dashboard_save_checks_duplicate_names_client_side(server):
+    url, _ = server
+    _, page = _req(url, "/")
+    assert "function dupNames()" in page and "const dn=dupNames();if(dn.length)" in page

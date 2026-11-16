@@ -14,6 +14,9 @@ jev-build-router/
     ledger.py               engine ledger + scorecard
     runner.py               prompt composition, agy/codex commands, spawn, .done markers, compose-fix, manual handoff
     state.py                engine availability: state file, reset-hint parsing, live probe, pick
+    switches.py             saved engine on/off switches (~/.jbr/engine_switches.json)
+    teams.py                named teams and role engine lists (~/.jbr/teams.json)
+    dashboard.py            local dashboard (127.0.0.1) for engine switches and teams
     prereview.py            cheap first-pass review: open-code-review on local Ollama, before the Claude review
     cli.py
   workflows/
@@ -88,6 +91,40 @@ engine and pid, then four commands: `wait`, the `review_level.js` args for an OK
 (and uses an id) but launches nothing and probes nothing live. When no external engine is available
 the plan is kept, nothing is spawned and it exits 3: do the task in the session. Manual and Claude-subagent
 engines are refused (exit 2). Review stays mandatory: an engine's OK is not acceptance.
+
+## Teams (`jbr teams` / `jbr quick --team`, since 2026-11-16)
+
+Named teams (e.g. `marketing`, `engineering`), each with roles (e.g. `drafter`, `editor`, `builder`, `reviewer`),
+where each role has its own ordered list of jbr engines and role instructions. Stored in `~/.jbr/teams.json`
+(`$JBR_TEAMS` overrides, else beside `$JBR_STATE`):
+
+```json
+{"teams": {
+  "marketing": {
+    "description": "Marketing copy and campaign docs",
+    "kind": "doc",
+    "roles": {
+      "drafter": {"engines": ["agy_gemini_flash", "hermes_qwen", "claude_subagent"], "instructions": "Write the first draft ..."},
+      "editor":  {"engines": ["agy_claude_opus", "claude_subagent"], "instructions": "..."}
+    }
+  }
+}}
+```
+
+- **Commands**:
+  ```bash
+  PYTHONPATH="$JBR" python -m jbr teams init                                         # starter marketing + engineering teams (refuses to overwrite)
+  PYTHONPATH="$JBR" python -m jbr teams [--json]                                     # every team, kind, role engines (on/off, status) and current pick
+  PYTHONPATH="$JBR" python -m jbr team-set marketing drafter \
+      --engines agy_gemini_flash,hermes_qwen,claude_subagent \
+      --instructions "Write the first draft ..." --kind doc --description "Marketing copy"
+  PYTHONPATH="$JBR" python -m jbr team-rm marketing [editor]                         # remove one role, or the whole team
+  PYTHONPATH="$JBR" python -m jbr --project . quick --team marketing [--role drafter] "Write the launch post in docs/launch.md"
+  ```
+- **Role picking**: `quick --team T [--role R]` defaults `R` to the team's first role (role order in `teams.json` is preserved). `teams.pick_for_role` walks that role's engine list **in its listed order** (ignoring `priority`), skips excluded and switched-off engines, allows `assign_only` engines when listed, and returns the first usable engine. Reaching `claude_subagent` (or exhausting the list) exits 3 so the session does the task itself. `--team` and `--engine` cannot be combined (exit 2). The role's `instructions` are prepended to the spec as `## Role: <team>/<role>` before `## Task`, and `team`, `role`, `kind` are saved in the work package JSON so `quick --id Qn` reuses the role's chain on retry.
+- **`code` vs `doc` mode**: a team's `kind` is `"code"` (default) or `"doc"`. For `"doc"`, no test command is used unless `--test-cmd` is passed explicitly, the package's `tests` field reads `"none: document task, reviewed against the acceptance criteria"`, and the printed `review_level.js` args include `"mode": "doc"`. In `doc` mode, `review_level.js` skips the mutation check (`mutation_check` `"n/a (doc)"`) and runs tests only when `testCmd` was given (otherwise `pytest_summary` `"n/a (doc)"`, `test_count` `0`), reads the written files in full against the acceptance criteria and role instructions, checks prose quality (no invented claims, matches requested audience/tone/length, no placeholders or leftover instructions), and still checks file ownership. Edits (`team-set`, `team-rm`, dashboard Save) refuse to touch a malformed `teams.json`; fix the file first. `quick --id Qn` keeps the stored plan's kind even when `--team` names another team.
+- **Dashboard editing**: `jbr dashboard` includes a **Teams** section under the engines table (`GET/POST /api/teams`, token + loopback `Host` checked, body <= 64 KB) to add/remove teams and roles, reorder or add/remove role engine chips (each chip colored by on/off and last probe status), edit instructions, and save with inline server validation.
+- **Multi-role pipelines**: the main session still drives multi-role pipelines by running one role after another (e.g. `quick --team marketing --role drafter ...`, wait + review, then `quick --team marketing --role editor ...` on the resulting file).
 
 ## Engine chain (default since 2026-10-02; automated agy back on since 2026-11-06)
 
@@ -245,11 +282,12 @@ Nothing is written into the project. Per project (key = its absolute path with s
 ~/.jbr/ledger.jsonl              engine ledger (all projects)
 ~/.jbr/engine_state.json         quota / availability state
 ~/.jbr/engine_switches.json      saved on/off switches (jbr enable / disable / dashboard)
+~/.jbr/teams.json                named teams and role engine lists (jbr teams / team-set / dashboard)
 ~/.jbr/ocr-home/                 prereview's private HOME for ocr (config with the local provider only, ocr sessions)
 ```
 
 `python -m jbr --project <root> paths` prints them; pass `.reports_dir` to the Workflow scripts as `reportsDir`.
-`JBR_RUNS`, `JBR_LEDGER`, `JBR_STATE`, `JBR_SWITCHES` override the locations. `--reports <dir>` still works (relative = inside the project).
+`JBR_RUNS`, `JBR_LEDGER`, `JBR_STATE`, `JBR_SWITCHES`, `JBR_TEAMS` override the locations. `--reports <dir>` still works (relative = inside the project).
 
 ## Backlog lane (`jbr queue`)
 

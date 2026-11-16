@@ -45,6 +45,7 @@ def project(tmp_path):
 def isolated_engine_state(tmp_path, monkeypatch):
     """Every test gets its own engine state file: never touch ~/.jbr, never inherit a real quota."""
     monkeypatch.delenv("JBR_SWITCHES", raising=False)  # the switches then follow JBR_STATE below, per test
+    monkeypatch.delenv("JBR_TEAMS", raising=False)     # and the teams file follows JBR_STATE too
     path = tmp_path / "jbr-state" / "engine_state.json"
     monkeypatch.setenv("JBR_STATE", str(path))
     # ...and its own runs dir and ledger: no test writes run artifacts or ledger lines under the real ~/.jbr
