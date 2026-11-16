@@ -145,3 +145,62 @@ def all_engines_state():
     from tests.conftest import REPO
     engines = router.load_engines(REPO / "engines.json")
     state.mark_exhausted("codex_astra", engines["codex_astra"], "2h")
+
+
+def test_quick_team_doc_and_code_modes_and_id_reuse(project, capsys, monkeypatch, spawned):
+    from jbr import teams
+    teams.save(teams.example())
+    monkeypatch.setattr(state, "probe", lambda k, engs, **kw: state.Probe(k, state.AVAILABLE))
+
+    # 1. --team with default role (drafter, kind=doc)
+    assert cli.main(["--project", str(project), "quick", "--team", "marketing", "Write launch post", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "Q1: engine=agy_gemini_flash" in out
+    qp = runner.quick_plan_paths(project, "Q1")
+    (wp,) = runner.load_packages(qp["packages"])[0]
+    assert wp["team"] == "marketing" and wp["role"] == "drafter" and wp["kind"] == "doc"
+    assert wp["tests"] == ["none: document task, reviewed against the acceptance criteria"]
+    spec = qp["spec"].read_text(encoding="utf-8")
+    assert spec.index("## Role: marketing/drafter") < spec.index("## Task")
+    assert "Write the first draft" in spec
+    review = json.loads(out.split("args=", 1)[1].splitlines()[0])
+    assert review["mode"] == "doc" and "testCmd" not in review
+    assert "quick --id Q1 --team marketing --role drafter --exclude agy_gemini_flash" in out
+    # the engine prompt for a doc task must not tell the engine to run the test suite
+    prompt = runner.compose_prompt(project, wp, qp["prompts"])
+    assert "run the full test suite" not in prompt and "document task" in prompt
+
+    # 2. Explicit --test-cmd still wins on doc mode
+    assert cli.main(["--project", str(project), "quick", "--team", "marketing", "--role", "editor",
+                     "Edit launch post", "--test-cmd", "pytest -k doc", "--dry-run"]) == 0
+    out2 = capsys.readouterr().out
+    (wp2,) = runner.load_packages(runner.quick_plan_paths(project, "Q2")["packages"])[0]
+    assert wp2["role"] == "editor" and wp2["tests"] == ["pytest -k doc"]
+    assert "no_tests" not in wp2  # an explicit test command keeps the default rules (run it)
+    review2 = json.loads(out2.split("args=", 1)[1].splitlines()[0])
+    assert review2["mode"] == "doc" and review2["testCmd"] == "pytest -k doc"
+
+    # 3. quick --id Q1 reuses the stored team/role chain when --team is not given
+    assert cli.main(["--project", str(project), "quick", "--id", "Q1", "--exclude", "agy_gemini_flash", "--dry-run"]) == 0
+    out3 = capsys.readouterr().out
+    assert "Q1: engine=hermes_qwen" in out3
+    assert "--team marketing --role drafter" in out3
+
+
+def test_quick_team_refuses_engine_combination_and_unknown_team_or_role(project, capsys, spawned):
+    from jbr import teams
+    teams.save(teams.example())
+
+    assert cli.main(["--project", str(project), "quick", "--team", "marketing", "--engine", "codex_astra", "task"]) == 2
+    assert spawned == [] and not paths.quick_dir(project).exists()
+
+    capsys.readouterr()
+    assert cli.main(["--project", str(project), "quick", "--team", "sales", "task"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown team 'sales'" in err and "marketing" in err and "engineering" in err
+
+    assert cli.main(["--project", str(project), "quick", "--team", "marketing", "--role", "cfo", "task"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown role 'cfo'" in err and "drafter" in err and "editor" in err
+    assert spawned == [] and not paths.quick_dir(project).exists()
+

@@ -1,4 +1,4 @@
-"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done|inbox|quick|engines|enable|disable|reset|dashboard
+"""python -m jbr route|run|spawn|wait|compose-fix|status|probe|pick|prereview|handoff|done|inbox|quick|engines|enable|disable|reset|dashboard|teams|team-set|team-rm
 
 Global options (before the subcommand):
   --project <root>          project root (default: cwd)
@@ -16,8 +16,14 @@ local Ollama (jbr/prereview.py) and writes prereview-<WP>[-tag].json; it always 
 in the json and the .done marker), so a missing tool or a slow model never stops a build.
 
 Quick: `quick "<task>"` writes a one-package plan under ~/.jbr/runs/<key>/quick/<id>/ (never in the project),
-picks the first available external engine (or takes --engine), spawns it and prints the `wait` command, the
-review_level.js args and a retry line. No external engine available: the plan is kept and it exits 3.
+picks the first available external engine (or takes --engine or --team/--role), spawns it and prints the
+`wait` command, the review_level.js args and a retry line. No external engine available: the plan is kept
+and it exits 3.
+
+Teams: `teams` lists configured teams and roles (`~/.jbr/teams.json`, override $JBR_TEAMS) with each role's
+ordered engine list and current pick; `teams init` writes a starter file; `team-set` and `team-rm` edit
+teams/roles from the CLI (`dashboard` edits them in the browser); `quick --team <team> [--role <role>]`
+picks from that role's engine list in order and injects its instructions into the spec.
 
 Switches: `disable <engine>` / `enable <engine>` / `reset <engine>` save an on/off switch in
 ~/.jbr/engine_switches.json that every jbr command obeys (engines.json < switch < --available);
@@ -36,7 +42,7 @@ import re
 import shlex
 import sys
 
-from jbr import paths, prereview, router, runner, state, switches
+from jbr import paths, prereview, router, runner, state, switches, teams
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_ENGINES = REPO_ROOT / "engines.json"
@@ -194,6 +200,8 @@ def _parser() -> argparse.ArgumentParser:
     qk.add_argument("--accept", action="append", default=[], metavar="TEXT", help="acceptance criterion (repeatable)")
     qk.add_argument("--test-cmd", default="", help="test command for the engine and the review (default: the project's suite)")
     qk.add_argument("--engine", default=None, help="skip the pick and use this engine")
+    qk.add_argument("--team", default=None, help="team name in teams.json (pick from that role's engine list)")
+    qk.add_argument("--role", default=None, help="role in --team (default: the team's first role)")
     qk.add_argument("--exclude", default="", help="comma-separated engines the pick skips (e.g. the one that just hit quota)")
     qk.add_argument("--no-live", action="store_true", help="pick from the state file only; never probe an engine")
     qk.add_argument("--timeout", default=None, help="engine time limit (default: the engine's `timeout`, else 55m)")
@@ -212,6 +220,23 @@ def _parser() -> argparse.ArgumentParser:
     db = sub.add_parser("dashboard", help="local page (127.0.0.1) to see engines and switch them on or off")
     db.add_argument("--port", type=int, default=8765)
     db.add_argument("--no-open", action="store_true", help="do not open a browser")
+
+    tm = sub.add_parser("teams", help="list every team, its kind, and each role's engines and current pick; `teams init` writes a starter file")
+    tm.add_argument("action", nargs="?", choices=["init"], help="`init` writes teams.example() if the teams file does not exist")
+    tm.add_argument("--json", action="store_true")
+
+    ts = sub.add_parser("team-set", help="create or update a team role in teams.json")
+    ts.add_argument("team")
+    ts.add_argument("role")
+    ts.add_argument("--engines", dest="role_engines", default="", help="comma-separated ordered list of engine keys")
+    ts.add_argument("--instructions", default=None, help="role instructions text")
+    ts.add_argument("--instructions-file", default=None, help="file holding role instructions text")
+    ts.add_argument("--kind", default=None, help="team kind: code (default) or doc")
+    ts.add_argument("--description", default=None, help="team description")
+
+    tr = sub.add_parser("team-rm", help="remove a team or one role from a team")
+    tr.add_argument("team")
+    tr.add_argument("role", nargs="?", default=None)
 
     pk = sub.add_parser("pick", help="print the first available engine by priority (claude_subagent if none)")
     pk.add_argument("--exclude", default="", help="comma-separated engine keys to skip")
@@ -397,6 +422,84 @@ def cmd_dashboard(a) -> int:
     return 0
 
 
+def cmd_teams(a) -> int:
+    if a.action == "init":
+        p = teams.teams_path()
+        if p.exists():
+            print(f"{p} already exists; refusing to overwrite", file=sys.stderr)
+            return 2
+        known = router.load_engines(a.engines, use_switches=False)
+        teams.save(teams.example(), p, engines=known)
+        print(f"wrote {p}")
+        return 0
+    engines = _engines(a)
+    data = teams.load()
+    out: dict[str, dict] = {}
+    for tname, tobj in data.items():
+        roles_out: dict[str, dict] = {}
+        for rname, robj in (tobj.get("roles") or {}).items():
+            pick_key, _ = teams.pick_for_role(tname, rname, engines, live=False)
+            eng_rows = []
+            for ek in robj.get("engines") or []:
+                if ek in engines:
+                    on = bool(engines[ek].get("available", True))
+                    p = state.probe(ek, engines, live=False)
+                    status, line = p.status, p.line()
+                else:
+                    on, status, line = False, state.UNAVAILABLE, "UNAVAILABLE unknown engine"
+                eng_rows.append({"engine": ek, "on": on, "status": status, "status_line": line})
+            roles_out[rname] = {"pick": pick_key, "engines": eng_rows, "instructions": robj.get("instructions", "")}
+        out[tname] = {"kind": tobj.get("kind", "code"), "description": tobj.get("description", ""), "roles": roles_out}
+    if a.json:
+        print(json.dumps(out, indent=2))
+        return 0
+    if not out:
+        print(f"no teams configured (teams file: {teams.teams_path()}; run `python -m jbr teams init` for a starter file)")
+        return 0
+    for tname, t in out.items():
+        desc = f" - {t['description']}" if t["description"] else ""
+        print(f"{tname} [{t['kind']}]{desc}")
+        for idx, (rname, r) in enumerate(t["roles"].items()):
+            default_tag = " (default)" if idx == 0 else ""
+            chain_str = ", ".join(f"{e['engine']} ({'on' if e['on'] else 'off'}: {e['status']})" for e in r["engines"])
+            print(f"  {rname}{default_tag}: pick={r['pick']}  [{chain_str}]")
+    print(f"teams: {teams.teams_path()}")
+    return 0
+
+
+def cmd_team_set(a) -> int:
+    if a.instructions is not None and a.instructions_file is not None:
+        print("pass --instructions or --instructions-file, not both", file=sys.stderr)
+        return 2
+    instructions = a.instructions
+    if a.instructions_file is not None:
+        try:
+            instructions = pathlib.Path(a.instructions_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"[jbr team-set] {e}", file=sys.stderr)
+            return 2
+    known = router.load_engines(a.engines, use_switches=False)
+    eng_list = [e.strip() for e in (a.role_engines or "").split(",") if e.strip()]
+    try:
+        teams.set_role(a.team, a.role, eng_list, instructions=instructions, kind=a.kind,
+                       description=a.description, known_engines=known)
+    except ValueError as e:
+        print(f"[jbr team-set] {e}", file=sys.stderr)
+        return 2
+    print(f"{a.team}/{a.role}: engines={eng_list}")
+    return 0
+
+
+def cmd_team_rm(a) -> int:
+    try:
+        teams.remove(a.team, a.role)
+    except (KeyError, ValueError) as e:
+        print(f"[jbr team-rm] {e.args[0] if e.args else e}", file=sys.stderr)
+        return 2
+    print(f"removed {a.team}/{a.role}" if a.role else f"removed team {a.team}")
+    return 0
+
+
 SLOW_ENGINES = {"ollama_qwen": 140, "lan_qwen": 140, "hermes_qwen": 140}  # wait minutes; the rest finish within the default 70
 
 
@@ -406,7 +509,11 @@ def cmd_quick(a) -> int:
     if a.task and a.task_file:
         print("pass the task as an argument or with --task-file, not both", file=sys.stderr)
         return 2
+    if a.team and a.engine:
+        print("pass --team or --engine, not both", file=sys.stderr)
+        return 2
     task = a.task or (pathlib.Path(a.task_file).read_text(encoding="utf-8") if a.task_file else "")
+    stored_wp: dict = {}
     if a.qid:
         if task:
             print("pass a task or --id, not both", file=sys.stderr)
@@ -419,10 +526,42 @@ def cmd_quick(a) -> int:
         if not qp["packages"].exists():
             print(f"no quick plan {qid} at {qp['packages']}", file=sys.stderr)
             return 2
+        pkgs, _ = runner.load_packages(qp["packages"])
+        stored_wp = pkgs[0] if pkgs else {}
     elif not task.strip():
         print("give the task as an argument or with --task-file", file=sys.stderr)
         return 2
-    if a.engine:
+    team_name = a.team or (stored_wp.get("team") if a.qid and not a.engine else None)
+    role_name = a.role or (stored_wp.get("role") if a.qid and not a.team and not a.engine else None)
+    if a.role and not team_name:
+        print("--role requires --team", file=sys.stderr)
+        return 2
+    kind = stored_wp.get("kind", "code")
+    role_instructions = ""
+    if team_name:
+        teams_data = teams.load()
+        if team_name not in teams_data:
+            print(f"unknown team {team_name!r}; known: {sorted(teams_data)}", file=sys.stderr)
+            return 2
+        t_obj = teams_data[team_name]
+        roles = t_obj.get("roles") or {}
+        if not role_name:
+            if not roles:
+                print(f"team {team_name!r} has no roles", file=sys.stderr)
+                return 2
+            role_name = next(iter(roles))
+        if role_name not in roles:
+            print(f"unknown role {role_name!r} in team {team_name!r}; known: {list(roles)}", file=sys.stderr)
+            return 2
+        if not a.qid:  # a re-run keeps the stored plan's kind: its prompt and acceptance were written for it
+            kind = t_obj.get("kind", "code")
+        role_instructions = (roles[role_name].get("instructions") or "").strip()
+        exclude = {e.strip() for e in a.exclude.split(",") if e.strip()}
+        engine_key, seen = teams.pick_for_role(team_name, role_name, engines, exclude, live=not (a.no_live or a.dry_run))
+        for r in seen:
+            if r.engine != engine_key:
+                print(f"[jbr quick] {r.engine}: {r.line()}", file=sys.stderr)
+    elif a.engine:
         if a.engine not in engines:
             print(f"unknown engine {a.engine!r}; known: {sorted(engines)}", file=sys.stderr)
             return 2
@@ -439,9 +578,16 @@ def cmd_quick(a) -> int:
         for r in seen:
             if r.engine != engine_key:
                 print(f"[jbr quick] {r.engine}: {r.line()}", file=sys.stderr)
+    is_doc = kind == "doc"
     if not a.qid:
         files = [f.strip() for f in a.files.split(",") if f.strip()]
-        qid, qp = runner.write_quick_plan(project, task, files=files, acceptance=a.accept, test_cmd=a.test_cmd)
+        role_sec = ""
+        meta = None
+        if team_name and role_name:
+            role_sec = f"## Role: {team_name}/{role_name}" + (f"\n\n{role_instructions}" if role_instructions else "")
+            meta = {"team": team_name, "role": role_name, "kind": kind}
+        qid, qp = runner.write_quick_plan(project, task, files=files, acceptance=a.accept, test_cmd=a.test_cmd,
+                                          role_section=role_sec, meta=meta, doc=is_doc)
     # printed commands carry every global option this call had, so `wait`/`compose-fix`/`spawn` find the same files
     globals_ = ["--project", str(project)]
     if a.reports:
@@ -453,10 +599,11 @@ def cmd_quick(a) -> int:
     jbr = (f"PYTHONPATH={shlex.quote(str(REPO_ROOT))} {shlex.quote(sys.executable)} -m jbr "
            + " ".join(shlex.quote(g) for g in globals_))
     plan_opts = f"--packages {shlex.quote(str(qp['packages']))} --prompts {shlex.quote(str(qp['prompts']))}"
+    team_opts = f" --team {shlex.quote(team_name)} --role {shlex.quote(role_name)}" if team_name and role_name else ""
     print(f"{qid}: plan {qp['packages']}")
     if engines.get(engine_key, {}).get("runner") == "claude_subagent":
         print(f"{qid}: no external engine available; do the task in this session (spec: {qp['spec']})")
-        print(f"retry later: {jbr} quick --id {qid}")
+        print(f"retry later: {jbr} quick --id {qid}{team_opts}")
         return 3
     run_args = ["--engine", engine_key, "--engines", str(pathlib.Path(a.engines).resolve()),
                 "--packages", str(qp["packages"]), "--prompts", str(qp["prompts"])]
@@ -471,24 +618,27 @@ def cmd_quick(a) -> int:
         print(f"{qid}: engine={engine_key} [dry-run] {json.dumps(res['argv'])}")
     else:
         print(f"{qid}: engine={engine_key} spawned pid={res['pid']} marker={res['marker']}")
-    review = {"root": str(project), "ids": [qid], "promptsDir": str(qp["prompts"]),
-              "reportsDir": str(paths.reports_dir(project, a.reports)), "jbr": str(REPO_ROOT), "jbrArgs": plan_opts}
+    review: dict = {"root": str(project), "ids": [qid], "promptsDir": str(qp["prompts"]),
+                    "reportsDir": str(paths.reports_dir(project, a.reports)), "jbr": str(REPO_ROOT), "jbrArgs": plan_opts}
     if a.test_cmd:
         review["testCmd"] = a.test_cmd
+    if is_doc:
+        review["mode"] = "doc"
     print(f"wait:   {jbr} wait {qid} --timeout-min {SLOW_ENGINES.get(engine_key, 70)}")
     print(f"review (OK only): Workflow {REPO_ROOT / 'workflows' / 'review_level.js'} args={json.dumps(review)}")
     print(f"fix:    {jbr} compose-fix <review output.json> 1, then "
           f"{jbr} {plan_opts} spawn {qid} --engine {engine_key} --tag fix1 --extra-file <fix file>, then "
           f"{jbr} wait {qid} --tag fix1 --timeout-min {SLOW_ENGINES.get(engine_key, 70)} and review again with logTag \"fix1\"")
     excl = ",".join(sorted({e.strip() for e in a.exclude.split(",") if e.strip()} | {engine_key}))
-    print(f"retry (QUOTA/CRASH): {jbr} quick --id {qid} --exclude {excl}")
+    print(f"retry (QUOTA/CRASH): {jbr} quick --id {qid}{team_opts} --exclude {excl}")
     return 0
 
 
 GLOBAL_OPTS = {"--project", "--packages", "--prompts", "--engines", "--available", "--reports"}
 # sub-options that take one value: the token after them is a VALUE, never a global option
 VALUE_OPTS = {"--from", "--status", "--exit", "--minutes", "--notes", "--notes-file", "--reason", "--build", "--base", "--test-cmd", "--max", "--test-timeout-min", "--engine", "--extra", "--extra-file", "--tag", "--timeout", "--now", "--goal", "--state-json",
-              "--model", "--timeout-min", "--poll", "--exclude", "--task-file", "--id", "--files", "--accept", "--note", "--port", "--commit", "--url", "--backend-engine", "--effort", "--budget-min"}
+              "--model", "--timeout-min", "--poll", "--exclude", "--task-file", "--id", "--files", "--accept", "--note", "--port", "--commit", "--url", "--backend-engine", "--effort", "--budget-min",
+              "--team", "--role", "--instructions", "--instructions-file", "--kind", "--description"}
 
 
 def _hoist_globals(argv: list[str]) -> list[str]:
@@ -498,15 +648,23 @@ def _hoist_globals(argv: list[str]) -> list[str]:
     sub_idx = next((i for i, t in enumerate(argv) if not t.startswith("-") and t in
                     {"route", "run", "spawn", "wait", "compose-fix", "status", "probe", "pick", "assign", "record", "scorecard", "paths", "queue",
                      "prereview", "handoff", "done", "inbox", "quick", "engines",
-                     "enable", "disable", "reset", "dashboard"}), None)
+                     "enable", "disable", "reset", "dashboard", "teams", "team-set", "team-rm"}), None)
     if sub_idx is None:
         return argv
     head, tail = argv[:sub_idx], argv[sub_idx:]
+    sub_cmd = tail[0]
     hoisted, rest = [], []
     i = 0
     while i < len(tail):
         t = tail[i]
-        if t in VALUE_OPTS and i + 1 < len(tail):
+        if sub_cmd == "team-set" and (t == "--engines" and i + 1 < len(tail) or t.startswith("--engines=")):
+            if t == "--engines":
+                rest += [t, tail[i + 1]]
+                i += 2
+            else:
+                rest.append(t)
+                i += 1
+        elif t in VALUE_OPTS and i + 1 < len(tail):
             rest += [t, tail[i + 1]]
             i += 2
         elif t in GLOBAL_OPTS and i + 1 < len(tail):
@@ -917,7 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
             "assign": cmd_assign, "record": cmd_record, "scorecard": cmd_scorecard, "paths": cmd_paths, "queue": cmd_queue,
             "prereview": cmd_prereview, "handoff": cmd_handoff, "done": cmd_done, "inbox": cmd_inbox,
             "quick": cmd_quick, "engines": cmd_engines, "enable": cmd_switch, "disable": cmd_switch,
-            "reset": cmd_switch, "dashboard": cmd_dashboard}[a.cmd](a)
+            "reset": cmd_switch, "dashboard": cmd_dashboard, "teams": cmd_teams, "team-set": cmd_team_set,
+            "team-rm": cmd_team_rm}[a.cmd](a)
 
 
 if __name__ == "__main__":

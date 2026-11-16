@@ -46,6 +46,11 @@ DEFAULT_RULES = (
     "report the final test summary line, the list of files you created/changed, and any acceptance item you "
     "could not satisfy."
 )
+DOC_RULES = (
+    "Rules: do NOT modify files owned by other work packages except to append exports. Do not commit to git. "
+    "Do not create files outside the repo. This is a document task: do not run any test suite; report the "
+    "list of files you created/changed and any acceptance item you could not satisfy."
+)
 
 
 # ----------------------------------------------------------------------------- packages
@@ -93,11 +98,13 @@ def _as_list(v: Any) -> list[str]:
     return [str(x) for x in v]
 
 
-def rules_line(rules: str | None) -> str:
+def rules_line(rules: str | None, no_tests: bool = False) -> str:
     """Project rules are a PREFIX to DEFAULT_RULES, never a replacement: the ownership /
-    no-commit / no-files-outside-repo rules are always emitted."""
+    no-commit / no-files-outside-repo rules are always emitted. A document task (`no_tests`) gets
+    DOC_RULES instead, the same rules without "run the full test suite"."""
+    base = DOC_RULES if no_tests else DEFAULT_RULES
     rules = (rules or "").strip()
-    return f"{rules} {DEFAULT_RULES}" if rules else DEFAULT_RULES
+    return f"{rules} {base}" if rules else base
 
 
 def compose_prompt(project_root: str | os.PathLike, wp: dict, prompts_dir: str | os.PathLike = "ops/prompts",
@@ -106,7 +113,7 @@ def compose_prompt(project_root: str | os.PathLike, wp: dict, prompts_dir: str |
     lines = [
         f"You are the software engineer on work package {wp['id']}: {wp.get('title', '')}.",
         f"Repository root (already exists): {root}",
-        rules_line(rules or wp.get("rules")),
+        rules_line(rules or wp.get("rules"), no_tests=bool(wp.get("no_tests"))),
         "",
         "GOAL",
         wp.get("goal", ""),
@@ -425,6 +432,8 @@ def launch_detached(argv: list[str], cwd: pathlib.Path, stdout_path: pathlib.Pat
 QUICK_PREFIX = "Q"
 QUICK_ACCEPTANCE = ["The task in the spec is done as described, and nothing beyond it was changed.",
                     "The project's existing tests still pass."]
+QUICK_DOC_ACCEPTANCE = ["The task in the spec is done as described, and nothing beyond it was changed."]
+QUICK_DOC_TESTS = "none: document task, reviewed against the acceptance criteria"
 
 
 def quick_plan_paths(project_root: str | os.PathLike, qid: str) -> dict[str, pathlib.Path]:
@@ -433,7 +442,8 @@ def quick_plan_paths(project_root: str | os.PathLike, qid: str) -> dict[str, pat
 
 
 def write_quick_plan(project_root: str | os.PathLike, task: str, *, files: list[str] | None = None,
-                     acceptance: list[str] | None = None, test_cmd: str = "") -> tuple[str, dict[str, pathlib.Path]]:
+                     acceptance: list[str] | None = None, test_cmd: str = "", role_section: str = "",
+                     meta: dict | None = None, doc: bool = False) -> tuple[str, dict[str, pathlib.Path]]:
     """Write a one-package plan for `task` under paths.quick_dir (never inside the project); returns (id, paths).
 
     Ids are Q1, Q2, ... per project. The id's directory is created with exist_ok=False, so two sessions
@@ -455,16 +465,28 @@ def write_quick_plan(project_root: str | os.PathLike, task: str, *, files: list[
             break
         except FileExistsError:
             n += 1
-    acceptance = acceptance or QUICK_ACCEPTANCE
+    acceptance = acceptance or (QUICK_DOC_ACCEPTANCE if doc and not test_cmd else QUICK_ACCEPTANCE)
     title = task.splitlines()[0][:80]
-    wp = {"id": qid, "title": title, "depends_on": [],
-          "goal": "Do the task in the FULL PACKAGE SPEC below.",
-          "files": files or ["(no fixed list) change only the files this task needs"],
-          "acceptance": acceptance, "tests": [test_cmd] if test_cmd else ["the project's existing test suite"],
-          "spec_refs": [], "implementer_prompt": ""}
+    tests_val = [test_cmd] if test_cmd else ([QUICK_DOC_TESTS] if doc else ["the project's existing test suite"])
+    wp: dict[str, Any] = {"id": qid, "title": title, "depends_on": [],
+                          "goal": "Do the task in the FULL PACKAGE SPEC below.",
+                          "files": files or ["(no fixed list) change only the files this task needs"],
+                          "acceptance": acceptance, "tests": tests_val,
+                          "spec_refs": [], "implementer_prompt": ""}
+    if doc and not test_cmd:
+        wp["no_tests"] = True  # compose_prompt then uses DOC_RULES: no "run the full test suite"
+    if meta:
+        wp.update(meta)
     qp["prompts"].mkdir()
     qp["packages"].write_text(json.dumps({"work_packages": [wp]}, indent=2) + "\n", encoding="utf-8")
-    spec = [f"# {qid}: {title}", "", "## Task", "", task, "", "## Acceptance", "", *[f"- {x}" for x in acceptance]]
+    spec = [f"# {qid}: {title}"]
+    if role_section.strip():
+        rs = role_section.strip()
+        if not rs.startswith("## Role"):
+            hdr = f"## Role: {meta['team']}/{meta['role']}" if (meta or {}).get("team") and (meta or {}).get("role") else "## Role"
+            rs = f"{hdr}\n\n{rs}"
+        spec += ["", rs]
+    spec += ["", "## Task", "", task, "", "## Acceptance", "", *[f"- {x}" for x in acceptance]]
     spec += ["", "## Files", "", *([f"- {f}" for f in files] if files else ["(no fixed list) only the files this task needs"])]
     qp["spec"].write_text("\n".join(spec) + "\n", encoding="utf-8")
     return qid, qp

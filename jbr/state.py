@@ -217,12 +217,12 @@ def load(path: pathlib.Path | None = None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _write(p: pathlib.Path, data: dict) -> None:
+def _write(p: pathlib.Path, data: dict, *, sort_keys: bool = True) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=f".{p.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
+            json.dump(data, fh, indent=2, sort_keys=sort_keys)
             fh.flush()
             os.fsync(fh.fileno())
         _retry(lambda: os.replace(tmp, p))

@@ -16,9 +16,10 @@
 //                                       // last engine run did no work is NOT reviewed (verdict 'blocked')
 //   jbr: '/path/to/jev-build-router',   // needed for preReview
 //   jbrArgs: '--packages <plan>/work_packages.json',  // global jbr options for prereview (optional)
-//   preReview: false                    // true | { effort: 'low', budgetMin: 45 }: `jbr prereview` (open-code-review on local
+//   preReview: false,                   // true | { effort: 'low', budgetMin: 45 }: `jbr prereview` (open-code-review on local
 //                                       // Ollama) first; its findings are unverified hints for the reviewer. Needs jbr +
 //                                       // reportsDir. Skipped / failed / timed out: the review runs without it (default off)
+//   mode: 'code'                        // 'code' (default) | 'doc' (document review: no test run or mutation check)
 // }
 export const meta = {
   name: 'jbr-review-level',
@@ -52,6 +53,10 @@ const JBR_ARGS = A.jbrArgs ? ' ' + A.jbrArgs : ''   // e.g. '--packages <plan>/w
 const PRE = A.preReview ? Object.assign({ effort: 'low', budgetMin: 45 }, A.preReview === true ? {} : A.preReview) : null
 const PRE_WAITS = PRE ? Math.ceil(PRE.budgetMin / 8.5) + 1 : 0   // jbr enforces the budget, so the marker always comes
 if (PRE && (!JBR || !REPORTS)) throw new Error('args.preReview needs args.jbr and args.reportsDir (`python -m jbr --project <root> paths` .reports_dir)')
+const MODE = A.mode || 'code'
+if (!['code', 'doc'].includes(MODE)) throw new Error(`args.mode must be 'code' or 'doc', got ${JSON.stringify(A.mode)}`)
+const DOC = MODE === 'doc'
+const DOC_TESTS = DOC && !!A.testCmd   // a doc task given an explicit --test-cmd still runs it
 const deadRun = id => ['quota', 'crash'].includes(String(ENGINE_STATUS[id] || 'ok').toLowerCase())
 
 const REVIEW_SCHEMA = {
@@ -101,7 +106,7 @@ async function preReview(id) {
 const preRow = (pre, confirmed) => pre ? { prereview: { status: pre.status, findings: pre.findings,
   confirmed: confirmed.filter(f => /^pre-review:/i.test(f.criterion || '')).length } } : {}
 
-const reviewPrompt = (id, pre) => `Adversarial fresh-context review of work package ${id} in the repo ${ROOT}. You did not write this code; do not infer the author's intent, judge only what is on disk.${preHint(id, pre)}
+const codeReviewPrompt = (id, pre) => `Adversarial fresh-context review of work package ${id} in the repo ${ROOT}. You did not write this code; do not infer the author's intent, judge only what is on disk.${preHint(id, pre)}
 1. Read ${under(PROMPTS, id + '.md')} fully: it holds the goal, owned files and the acceptance criteria.
 2. ${REPORTS ? `Read ${under(REPORTS, LOG_PREFIX + '-' + id + LOG_TAG + '.log')} if it exists (the engineer's transcript; treat its claims as unverified).` : 'No engine transcript was provided; judge the code and tests only.'}
 3. Run the tests from the repo root with Bash: cd ${POSIX} && ${TEST_CMD} 2>&1 | tail -20 . Record the summary line and total test count. If the package spec names specific test ids, run them explicitly too.
@@ -111,8 +116,25 @@ const reviewPrompt = (id, pre) => `Adversarial fresh-context review of work pack
 7. Verdict 'fix' if any high or medium failure, any missing test that the criteria require, or tests not green. Report failures as one entry per criterion with a concrete fix instruction the engineer can apply.
 Do not fix anything yourself.`
 
-const refutePrompt = (id, f) => `Verify a review finding for work package ${id} in ${ROOT}. A reviewer reported this failure: ${JSON.stringify(f)}.
+const docReviewPrompt = (id, pre) => `Adversarial fresh-context document review of work package ${id} in the repo ${ROOT}. You did not write this document; do not infer the author's intent, judge only what is on disk.${preHint(id, pre)}
+1. Read ${under(PROMPTS, id + '.md')} fully: it holds the role instructions, the task, owned files and the acceptance criteria.
+2. ${REPORTS ? `Read ${under(REPORTS, LOG_PREFIX + '-' + id + LOG_TAG + '.log')} if it exists (the engineer's transcript; treat its claims as unverified).` : 'No engine transcript was provided; judge the files on disk only.'}
+3. ${DOC_TESTS ? `Run \`${TEST_CMD}\` (cd ${POSIX}) and report its summary line in pytest_summary and the test count in test_count; a red run is a high-severity failure. Do NOT run a mutation check: set mutation_check to "n/a (doc)".` : 'Do NOT run any test command and do NOT run a mutation check: set pytest_summary to "n/a (doc)", test_count to 0, and mutation_check to "n/a (doc)".'}
+4. Read in full every file the engine wrote or modified. Check EVERY acceptance criterion and the role instructions against the files the engine wrote; cite file:line evidence for each pass and each failure.
+5. Quality checks for prose: verify that factual claims are not invented, the writing matches the requested audience/tone/length, there is no placeholder text (TODO, TBD, lorem ipsum, "[insert ...]"), and there are no leftover instructions or prompt artifacts.
+6. Ownership: list any file the engineer modified that is not in the package's owned-file list (cd ${POSIX} && git status --short && git diff --stat) unless it is a pure export append.
+7. Verdict 'fix' if any high or medium failure against the acceptance criteria, role instructions, or prose quality checks. Report failures as one entry per criterion with a concrete fix instruction the engineer can apply.
+Do not fix anything yourself.`
+
+const reviewPrompt = (id, pre) => DOC ? docReviewPrompt(id, pre) : codeReviewPrompt(id, pre)
+
+const codeRefutePrompt = (id, f) => `Verify a review finding for work package ${id} in ${ROOT}. A reviewer reported this failure: ${JSON.stringify(f)}.
 Read ${under(PROMPTS, id + '.md')} for the acceptance criterion's exact wording, read the cited files, and run the relevant tests (cd ${POSIX} && ${TEST_CMD} <path> 2>&1 | tail -15). Decide whether the finding is REAL (the code truly violates the criterion as written) or REFUTED (the reviewer misread the criterion, the code, or the test output). Default to refuted only when you can show concrete evidence that the criterion is satisfied.`
+
+const docRefutePrompt = (id, f) => `Verify a review finding for document work package ${id} in ${ROOT}. A reviewer reported this failure: ${JSON.stringify(f)}.
+Read ${under(PROMPTS, id + '.md')} for the exact wording of the acceptance criteria and role instructions, and read the cited files in full. Decide whether the finding is REAL (the document truly violates the criterion, role instructions, or prose quality check) or REFUTED (the reviewer misread the spec or the document). Default to refuted only when you can show concrete evidence from the text on disk that the criterion is satisfied.`
+
+const refutePrompt = (id, f) => DOC ? docRefutePrompt(id, f) : codeRefutePrompt(id, f)
 
 // reviewing an engine run that did no work only burns a fix round: report it blocked instead
 const blocked = ids.filter(deadRun).map(id => {
@@ -133,7 +155,7 @@ const results = !live.length ? [] : await pipeline(live,
   },
   async (out, id) => {
     const { rev, pre } = PRE ? (out || {}) : { rev: out, pre: null }
-    if (!rev) return { wp: id, verdict: 'fix', confirmed_failures: [{ criterion: 'reviewer crashed', severity: 'high', evidence: 'no review result', fix: 're-run review' }], refuted_findings: [], low_findings: [], pytest_summary: '', test_count: 0, ownership_violations: [], mutation_check: '', passed_count: 0, ...preRow(pre, []) }
+    if (!rev) return { wp: id, verdict: 'fix', confirmed_failures: [{ criterion: 'reviewer crashed', severity: 'high', evidence: 'no review result', fix: 're-run review' }], refuted_findings: [], low_findings: [], pytest_summary: DOC ? 'n/a (doc)' : '', test_count: 0, ownership_violations: [], mutation_check: DOC ? 'n/a (doc)' : '', passed_count: 0, ...preRow(pre, []) }
     const serious = rev.failures.filter(f => f.severity !== 'low')
     const votes = await parallel(serious.map(f => () =>
       agent(refutePrompt(id, f), { label: `verify:${id}`, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'high' })
@@ -146,9 +168,13 @@ const results = !live.length ? [] : await pipeline(live,
       log(`${id}: verdict 'fix' with zero failure entries (${rev.pytest_summary}); kept as fix`)
       confirmed.push({ criterion: 'reviewer verdict fix without failure entries', severity: 'medium', evidence: rev.pytest_summary || 'no pytest summary reported', fix: 'make the full suite green and satisfy every acceptance criterion in the spec' })
     }
-    return { wp: id, verdict: confirmed.length ? 'fix' : 'accept', pytest_summary: rev.pytest_summary, test_count: rev.test_count,
+    return { wp: id, verdict: confirmed.length ? 'fix' : 'accept',
+      pytest_summary: DOC && !DOC_TESTS ? 'n/a (doc)' : rev.pytest_summary,
+      test_count: DOC && !DOC_TESTS ? 0 : rev.test_count,
       confirmed_failures: confirmed, refuted_findings: refuted, low_findings: low,
-      ownership_violations: rev.ownership_violations, mutation_check: rev.mutation_check, passed_count: rev.passed_criteria.length,
+      ownership_violations: rev.ownership_violations,
+      mutation_check: DOC ? 'n/a (doc)' : rev.mutation_check,
+      passed_count: rev.passed_criteria.length,
       ...preRow(pre, confirmed) }
   })
 return blocked.concat(results.filter(Boolean))
